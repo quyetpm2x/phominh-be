@@ -1,0 +1,682 @@
+// Schema tự thiết kế từ mọi bảng/field được nhắc cụ thể trong tai-lieu-cong-nghe-backend.md và
+// tài liệu bussiness.md — KHÔNG phải bản sao của "31 bảng đã thiết kế" gốc (tài liệu đó không có
+// sẵn ở đây). Field nào không được tài liệu nêu tên rõ thì tự bổ sung hợp lý, đánh dấu bằng comment.
+//
+// Cột geography (postedLocation, location) khai báo qua Unsupported() vì Prisma Client không tự
+// đọc/ghi kiểu geography — truy vấn bán kính dùng $queryRaw (ST_DWithin/ST_Distance), xem
+// src/modules/posts/posts.service.ts. Trước khi chạy `prisma migrate dev` lần đầu, PHẢI bật
+// extension PostGIS trên Supabase (Dashboard → Database → Extensions, hoặc
+// `create extension if not exists postgis;`) — nếu không, cột kiểu geography sẽ lỗi khi tạo bảng.
+// Sau migrate, chạy prisma/manual-sql/gist-indexes.sql một lần để thêm index GiST (bắt buộc theo
+// tai-lieu-cong-nghe-backend.md §11 — Prisma Migrate không tự sinh được index GiST).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ===================== NGƯỜI DÙNG & PHIÊN =====================
+
+model User {
+  // Tự sinh UUID — KHÔNG còn bằng auth.users.id của Supabase nữa. OTP đăng nhập/đăng ký do NestJS
+  // tự quản lý (auth/otp.service.ts, không dùng Supabase Auth cho user thường — quyết định đổi từ
+  // tai-lieu-cong-nghe-backend.md §4.1, xem ghi chú tại đầu module auth/).
+  id           String   @id @default(uuid()) @db.Uuid
+  phoneNumber  String   @unique @map("phone_number")
+  alias        String   @unique // bí danh tự sinh, cố định vĩnh viễn (bussiness §4.3)
+  realName     String?  @map("real_name") // tuỳ chọn, user tự đặt — dùng khi chọn hiển thị "tên thật" cho 1 bài
+  trustScoreE1 Float    @default(0) @map("trust_score_e1") // Lớp 1, chỉ tăng — điểm hiển thị = E1 trừ E2_hiệu_lực tính runtime
+  isBanned     Boolean  @default(false) @map("is_banned")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  appSessions            AppSession[]
+  refreshTokens          RefreshToken[]
+  fixedAreas             FixedArea[]
+  posts                  Post[]
+  comments               Comment[]
+  votesGiven             Vote[]                     @relation("VoteVoter")
+  trustScoreHistory      TrustScoreHistory[]
+  penaltyAppeals         PenaltyAppeal[]
+  reportsFiled           Report[]                   @relation("ReportReporter")
+  merchantProfile        MerchantProfile?
+  bankAccounts           UserBankAccount[]
+  payoutRequests         PayoutRequest[]
+  rewardLedger           RewardLedger[]
+  pushTokens             PushToken[]
+  notifSetting           NotificationDigestSetting?
+  emergencyConfirmations EmergencyConfirmation[]
+  dataDeletionRequests   DataDeletionRequest[]
+  ignoredUsers           IgnoredUser[]           @relation("IgnoreOwner")
+  ignoredByUsers         IgnoredUser[]           @relation("IgnoreTarget")
+
+  @@map("users")
+}
+
+// Tính năng "Không quan tâm" (tai-lieu-chuc-nang.md #32) — ẩn thầm lặng 1 người, chỉ ảnh hưởng feed
+// của chính người bấm ẩn, không thông báo/ảnh hưởng gì tới người bị ẩn (khác hẳn block 2 chiều).
+model IgnoredUser {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  ignoredUserId String   @map("ignored_user_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user        User @relation("IgnoreOwner", fields: [userId], references: [id], onDelete: Cascade)
+  ignoredUser User @relation("IgnoreTarget", fields: [ignoredUserId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, ignoredUserId])
+  @@map("ignored_users")
+}
+
+model AppSession {
+  id       String   @id @default(uuid()) @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  openedAt DateTime @default(now()) @map("opened_at") // nguồn duy nhất cho hệ số hoạt động (bussiness §4.2c) và G1
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, openedAt])
+  @@map("app_sessions")
+}
+
+// Vòng đời OTP đăng nhập/đăng ký (auth/otp.service.ts) — 1 bản ghi/lần gửi, không cập nhật đè lên
+// bản ghi cũ (bản cũ bị đánh dấu consumedAt khi có OTP mới cùng SĐT, xem OtpService.invalidatePrevious).
+model OtpVerification {
+  id          String    @id @default(uuid()) @db.Uuid
+  phoneNumber String    @map("phone_number") // E.164 đã chuẩn hoá, vd +84912345678
+  otpHash     String    @map("otp_hash") // HMAC-SHA256(otp, OTP_HASH_SECRET) — không lưu OTP dạng thô
+  attempts    Int       @default(0) // tăng atomic mỗi lần verify sai, khoá khi vượt ngưỡng (OtpService)
+  consumedAt  DateTime? @map("consumed_at") // set khi verify đúng HOẶC bị 1 OTP mới hơn của cùng SĐT vô hiệu hoá
+  expiresAt   DateTime  @map("expires_at") // now + 5 phút lúc tạo
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([phoneNumber, createdAt]) // phục vụ đếm rate-limit theo SĐT + tra bản ghi mới nhất
+  @@map("otp_verifications")
+}
+
+// Refresh token xoay vòng (rotation) — mỗi lần dùng để lấy access token mới thì token cũ bị revoke
+// và cấp token mới, phát hiện được nếu 1 refresh token bị đánh cắp và dùng lại (TokenService).
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @map("token_hash") // SHA-256(token) — không lưu token thô
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+enum AreaLabel {
+  home
+  work
+}
+
+model FixedArea {
+  id          String                                 @id @default(uuid()) @db.Uuid
+  userId      String                                 @map("user_id") @db.Uuid
+  label       AreaLabel
+  addressText String                                 @map("address_text")
+  lat         Float
+  lng         Float
+  location    Unsupported("geography(Point, 4326)")?
+  radiusKm    Float                                  @default(2) @map("radius_km")
+  createdAt   DateTime                               @default(now()) @map("created_at")
+  updatedAt   DateTime                               @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, label]) // đúng 1 "Nhà" + 1 "Chỗ làm" mỗi user (bussiness §2.1)
+  @@map("fixed_areas")
+}
+
+// ===================== BÀI ĐĂNG & TƯƠNG TÁC =====================
+
+enum PostType {
+  life
+  merchant
+  emergency
+}
+
+enum DisplayMode {
+  alias
+  real_name
+}
+
+enum PostStatus {
+  active
+  removed
+  expired
+}
+
+model Post {
+  id                  String                                 @id @default(uuid()) @db.Uuid
+  authorId            String                                 @map("author_id") @db.Uuid
+  postType            PostType                               @map("post_type")
+  content             String
+  lat                 Float
+  lng                 Float
+  postedLocation      Unsupported("geography(Point, 4326)")? @map("posted_location") // luôn là GPS thật lúc đăng, không phải fixed area
+  displayMode         DisplayMode                            @default(alias) @map("display_mode")
+  isLibraryPhoto      Boolean                                @default(false) @map("is_library_photo") // chỉ true hợp lệ cho merchant đã xác minh
+  status              PostStatus                             @default(active)
+  voteCount           Int                                    @default(0) @map("vote_count") // cache, cộng dồn từ Vote để đọc nhanh
+  commentCount        Int                                    @default(0) @map("comment_count")
+  expiresAt           DateTime?                              @map("expires_at") // null = khẩn cấp (không tự hết hạn tới khi giải quyết)
+  emergencyVerifiedAt DateTime?                              @map("emergency_verified_at") // đạt đủ ngưỡng xác nhận độc lập (bussiness §3, §7D.1 #6) — null = chưa đủ, chỉ hiện hẹp
+  createdAt           DateTime                               @default(now()) @map("created_at")
+  updatedAt           DateTime                               @updatedAt @map("updated_at")
+
+  author                 User                    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  images                 PostImage[]
+  comments               Comment[]
+  votes                  Vote[]                  @relation("VoteOnPost")
+  emergencyConfirmations EmergencyConfirmation[]
+  reports                Report[]
+
+  @@index([status, postType, expiresAt])
+  @@map("posts")
+}
+
+model PostImage {
+  id             String    @id @default(uuid()) @db.Uuid
+  postId         String    @map("post_id") @db.Uuid
+  url            String
+  exifCapturedAt DateTime? @map("exif_captured_at") // đối chiếu chống khai gian "chụp trực tiếp" (bussiness §4.2 Tầng 1)
+  sortOrder      Int       @default(0) @map("sort_order")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@map("post_images")
+}
+
+enum CommentVisibility {
+  public
+  private
+}
+
+model Comment {
+  id         String            @id @default(uuid()) @db.Uuid
+  postId     String            @map("post_id") @db.Uuid
+  authorId   String            @map("author_id") @db.Uuid
+  content    String
+  visibility CommentVisibility @default(public)
+  isPinned   Boolean           @default(false) @map("is_pinned") // chủ bài tự ghim (bussiness §4.1.1)
+  // ẩn bởi chủ bài (setHiddenByOwner) HOẶC tự xoá bởi chính tác giả (deleteOwn) — cùng field vì hiệu
+  // ứng với người xem giống hệt nhau (không còn ai thấy, không có màn khôi phục). Không còn liên quan
+  // điểm uy tín thấp — logic tự động ẩn theo trust score đã bỏ (bussiness §4.1 quy tắc 3, đã bỏ).
+  isHidden   Boolean           @default(false) @map("is_hidden")
+  createdAt  DateTime          @default(now()) @map("created_at")
+
+  post    Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author  User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  votes   Vote[]   @relation("VoteOnComment")
+  reports Report[]
+
+  @@index([postId, createdAt])
+  @@map("comments")
+}
+
+enum VoteTargetType {
+  post
+  comment
+}
+
+model Vote {
+  id            String         @id @default(uuid()) @db.Uuid
+  targetType    VoteTargetType @map("target_type")
+  postId        String?        @map("post_id") @db.Uuid
+  commentId     String?        @map("comment_id") @db.Uuid
+  voterId       String         @map("voter_id") @db.Uuid
+  weightApplied Float          @map("weight_applied") // snapshot tại thời điểm vote — KHÔNG tính lại (bussiness §4.2d)
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  voter   User     @relation("VoteVoter", fields: [voterId], references: [id], onDelete: Cascade)
+  post    Post?    @relation("VoteOnPost", fields: [postId], references: [id], onDelete: Cascade)
+  comment Comment? @relation("VoteOnComment", fields: [commentId], references: [id], onDelete: Cascade)
+
+  // Lưu ý: Postgres coi NULL khác NULL nên constraint này không chặn tuyệt đối vote trùng khi
+  // postId/commentId null lẫn nhau — votes.service.ts phải tự kiểm tra đã vote chưa trước khi ghi.
+  @@unique([voterId, postId, commentId])
+  @@map("votes")
+}
+
+model EmergencyConfirmation {
+  id          String   @id @default(uuid()) @db.Uuid
+  postId      String   @map("post_id") @db.Uuid
+  confirmerId String   @map("confirmer_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  post      Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  confirmer User @relation(fields: [confirmerId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, confirmerId])
+  @@map("emergency_confirmations")
+}
+
+// ===================== UY TÍN & KIỂM DUYỆT =====================
+
+enum TrustScoreSourceType {
+  vote
+  violation_confirmed
+  appeal_reversal
+}
+
+model TrustScoreHistory {
+  id                 String               @id @default(uuid()) @db.Uuid
+  userId             String               @map("user_id") @db.Uuid
+  delta              Float
+  sourceType         TrustScoreSourceType @map("source_type")
+  referenceId        String?              @map("reference_id") @db.Uuid
+  confirmedByAdminId String?              @map("confirmed_by_admin_id") @db.Uuid
+  createdAt          DateTime             @default(now()) @map("created_at")
+
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  confirmedByAdmin AdminUser?      @relation(fields: [confirmedByAdminId], references: [id])
+  penaltyAppeals   PenaltyAppeal[]
+
+  @@index([userId, createdAt])
+  @@map("trust_score_history")
+}
+
+enum AppealStatus {
+  pending
+  approved
+  rejected
+}
+
+model PenaltyAppeal {
+  id                  String       @id @default(uuid()) @db.Uuid
+  trustScoreHistoryId String       @map("trust_score_history_id") @db.Uuid
+  userId              String       @map("user_id") @db.Uuid
+  explanation         String
+  status              AppealStatus @default(pending)
+  reviewedByAdminId   String?      @map("reviewed_by_admin_id") @db.Uuid
+  createdAt           DateTime     @default(now()) @map("created_at")
+
+  trustScoreHistory TrustScoreHistory @relation(fields: [trustScoreHistoryId], references: [id], onDelete: Cascade)
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reviewedByAdmin   AdminUser?        @relation(fields: [reviewedByAdminId], references: [id])
+
+  @@map("penalty_appeals")
+}
+
+enum ReportTargetType {
+  post
+  comment
+  merchant_suspicious
+}
+
+enum ReportStatus {
+  pending
+  reviewed
+  actioned
+  dismissed
+}
+
+model Report {
+  id                String           @id @default(uuid()) @db.Uuid
+  targetType        ReportTargetType @map("target_type")
+  postId            String?          @map("post_id") @db.Uuid
+  commentId         String?          @map("comment_id") @db.Uuid
+  merchantId        String?          @map("merchant_id") @db.Uuid
+  reporterId        String?          @map("reporter_id") @db.Uuid // ẩn danh với người bị báo cáo, backend vẫn biết
+  reason            String
+  description       String?
+  status            ReportStatus     @default(pending)
+  reviewedByAdminId String?          @map("reviewed_by_admin_id") @db.Uuid
+  createdAt         DateTime         @default(now()) @map("created_at")
+
+  post            Post?            @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment         Comment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  merchant        MerchantProfile? @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  reporter        User?            @relation("ReportReporter", fields: [reporterId], references: [id])
+  reviewedByAdmin AdminUser?       @relation(fields: [reviewedByAdminId], references: [id])
+
+  @@index([status, targetType])
+  @@map("reports")
+}
+
+model CollusionFlag {
+  id              String   @id @default(uuid()) @db.Uuid
+  involvedUserIds String[] @map("involved_user_ids") // graph-based detection (bussiness §4.2a quy tắc 4) — không ràng buộc FK, chỉ tham chiếu
+  evidence        Json
+  status          String   @default("pending") // pending | confirmed | dismissed
+  detectedAt      DateTime @default(now()) @map("detected_at")
+
+  @@map("collusion_flags")
+}
+
+model CommentAttackIncident {
+  id               String    @id @default(uuid()) @db.Uuid
+  postId           String    @map("post_id") @db.Uuid
+  triggeredAt      DateTime  @default(now()) @map("triggered_at")
+  lockedUntil      DateTime  @map("locked_until")
+  authorNotifiedAt DateTime? @map("author_notified_at")
+
+  @@map("comment_attack_incidents")
+}
+
+// ===================== MERCHANT =====================
+
+enum PhoneVisibility {
+  always
+  business_hours
+  hidden
+}
+
+model MerchantProfile {
+  id                  String                                 @id @default(uuid()) @db.Uuid
+  userId              String                                 @unique @map("user_id") @db.Uuid
+  businessName        String                                 @map("business_name")
+  addressText         String                                 @map("address_text")
+  category            String?
+  lat                 Float
+  lng                 Float
+  location            Unsupported("geography(Point, 4326)")?
+  isVerified          Boolean                                @default(false) @map("is_verified") // điều kiện để dùng ảnh thư viện (bussiness §2.1)
+  verifiedAt          DateTime?                              @map("verified_at")
+  phoneVisibility     PhoneVisibility                        @default(hidden) @map("phone_visibility")
+  businessHoursStart  String?                                @map("business_hours_start") // "06:00"
+  businessHoursEnd    String?                                @map("business_hours_end")
+  zaloEnabled         Boolean                                @default(false) @map("zalo_enabled")
+  freeMonthsRemaining Int                                    @default(0) @map("free_months_remaining")
+  createdAt           DateTime                               @default(now()) @map("created_at")
+  updatedAt           DateTime                               @updatedAt @map("updated_at")
+
+  user                User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  menuPhotos          MerchantMenuPhoto[]
+  reports             Report[]
+  subscriptions       MerchantSubscription[]
+  paymentTransactions PaymentTransaction[]
+
+  @@map("merchant_profiles")
+}
+
+model MerchantMenuPhoto {
+  id         String   @id @default(uuid()) @db.Uuid
+  merchantId String   @map("merchant_id") @db.Uuid
+  url        String
+  caption    String?
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  merchant MerchantProfile @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@map("merchant_menu_photos")
+}
+
+// ===================== ADMIN =====================
+
+model AdminUser {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash") // xác thực riêng biệt, không dùng chung OTP Supabase (bussiness §9.1 A1)
+  name         String
+  isOwner      Boolean  @default(false) @map("is_owner")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  permissions          AdminUserPermission[]
+  actionLogs           AdminActionLog[]
+  sensitiveAccessLogs  SensitiveDataAccessLog[]
+  reviewedTrustHistory TrustScoreHistory[]
+  reviewedAppeals      PenaltyAppeal[]
+  reviewedReports      Report[]
+
+  @@map("admin_users")
+}
+
+model Permission {
+  id            String @id @default(uuid()) @db.Uuid
+  permissionKey String @unique @map("permission_key")
+  label         String
+  groupName     String @map("group_name")
+
+  adminUsers AdminUserPermission[]
+
+  @@map("permissions")
+}
+
+model AdminUserPermission {
+  adminUserId  String @map("admin_user_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  adminUser  AdminUser  @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([adminUserId, permissionId])
+  @@map("admin_user_permissions")
+}
+
+model AdminActionLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  adminUserId String   @map("admin_user_id") @db.Uuid
+  action      String
+  targetType  String?  @map("target_type")
+  targetId    String?  @map("target_id")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@map("admin_action_logs")
+}
+
+model SensitiveDataAccessLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  adminUserId String   @map("admin_user_id") @db.Uuid
+  dataType    String   @map("data_type") // vd "user_location" | "private_comment" | "bank_account"
+  targetId    String   @map("target_id")
+  reason      String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@map("sensitive_data_access_logs")
+}
+
+// ===================== THANH TOÁN (bussiness §11.3) =====================
+
+model MerchantSubscription {
+  id         String   @id @default(uuid()) @db.Uuid
+  merchantId String   @map("merchant_id") @db.Uuid
+  planKey    String   @map("plan_key")
+  startedAt  DateTime @default(now()) @map("started_at")
+  expiresAt  DateTime @map("expires_at")
+  status     String   @default("active")
+
+  merchant            MerchantProfile      @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  paymentTransactions PaymentTransaction[]
+
+  @@map("merchant_subscriptions")
+}
+
+enum PaymentProvider {
+  vnpay
+  momo
+  zalopay
+}
+
+model PaymentTransaction {
+  id                    String          @id @default(uuid()) @db.Uuid
+  merchantId            String          @map("merchant_id") @db.Uuid
+  subscriptionId        String?         @map("subscription_id") @db.Uuid
+  amount                Int // VND
+  provider              PaymentProvider
+  providerTransactionId String?         @map("provider_transaction_id")
+  status                String          @default("pending")
+  createdAt             DateTime        @default(now()) @map("created_at")
+
+  merchant     MerchantProfile       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  subscription MerchantSubscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@map("payment_transactions")
+}
+
+model UserBankAccount {
+  id                     String    @id @default(uuid()) @db.Uuid
+  userId                 String    @map("user_id") @db.Uuid
+  bankCode               String    @map("bank_code")
+  accountNumberEncrypted String    @map("account_number_encrypted") // mã hoá ở tầng service, không lưu plaintext
+  accountHolderName      String    @map("account_holder_name")
+  verifiedAt             DateTime? @map("verified_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payoutRequests PayoutRequest[]
+
+  @@map("user_bank_accounts")
+}
+
+enum PayoutSource {
+  leaderboard
+  referral
+}
+
+enum PayoutStatus {
+  pending
+  processing
+  success
+  failed
+}
+
+model PayoutRequest {
+  id                    String       @id @default(uuid()) @db.Uuid
+  userId                String       @map("user_id") @db.Uuid
+  bankAccountId         String       @map("bank_account_id") @db.Uuid
+  amount                Int
+  source                PayoutSource
+  status                PayoutStatus @default(pending)
+  providerTransactionId String?      @map("provider_transaction_id")
+  createdAt             DateTime     @default(now()) @map("created_at")
+
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankAccount UserBankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+
+  @@map("payout_requests")
+}
+
+// ===================== THƯỞNG & GIỚI THIỆU (bussiness §5.1) =====================
+
+enum RewardLedgerType {
+  leaderboard
+  referral
+  redeemed_voucher
+  payout
+}
+
+model RewardLedger {
+  id          String           @id @default(uuid()) @db.Uuid
+  userId      String           @map("user_id") @db.Uuid
+  amount      Int // điểm ví quy đổi, không phải tiền thật
+  type        RewardLedgerType
+  referenceId String?          @map("reference_id")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("reward_ledger")
+}
+
+model ReferralCode {
+  id              String   @id @default(uuid()) @db.Uuid
+  ownerUserId     String?  @map("owner_user_id") @db.Uuid // 1 trong 2 owner field sẽ có giá trị — không ép FK vì polymorphic
+  ownerMerchantId String?  @map("owner_merchant_id") @db.Uuid
+  code            String   @unique
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  redemptions ReferralRedemption[]
+
+  @@map("referral_codes")
+}
+
+model ReferralRedemption {
+  id             String    @id @default(uuid()) @db.Uuid
+  referralCodeId String    @map("referral_code_id") @db.Uuid
+  invitedUserId  String    @map("invited_user_id") @db.Uuid
+  qualifiedAt    DateTime? @map("qualified_at") // chỉ thưởng sau khi có hoạt động thật trong 7 ngày đầu
+  rewardGranted  Boolean   @default(false) @map("reward_granted")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  referralCode ReferralCode @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
+
+  @@map("referral_redemptions")
+}
+
+// ===================== THÔNG BÁO =====================
+
+enum PushPlatform {
+  ios
+  android
+}
+
+model PushToken {
+  id        String       @id @default(uuid()) @db.Uuid
+  userId    String       @map("user_id") @db.Uuid
+  token     String       @unique
+  platform  PushPlatform
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_tokens")
+}
+
+enum NotifFrequency {
+  daily
+  weekly
+  emergency_only
+}
+
+model NotificationDigestSetting {
+  userId          String         @id @map("user_id") @db.Uuid
+  frequency       NotifFrequency @default(weekly)
+  quietHoursStart String?        @map("quiet_hours_start")
+  quietHoursEnd   String?        @map("quiet_hours_end")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_digest_settings")
+}
+
+// ===================== THỐNG KÊ & PHÁP LÝ =====================
+
+model DailyMetricsSnapshot {
+  id           String   @id @default(uuid()) @db.Uuid
+  snapshotDate DateTime @map("snapshot_date") @db.Date
+  areaId       String?  @map("area_id") // null = toàn hệ thống; dùng khi có nhiều khu thí điểm
+  metrics      Json // G1-G8 — giữ linh hoạt vì chỉ số còn đang tinh chỉnh (bussiness §9.7)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([snapshotDate, areaId])
+  @@map("daily_metrics_snapshots")
+}
+
+enum DataDeletionStatus {
+  requested
+  processing
+  completed
+}
+
+model DataDeletionRequest {
+  id          String             @id @default(uuid()) @db.Uuid
+  userId      String             @map("user_id") @db.Uuid
+  status      DataDeletionStatus @default(requested)
+  requestedAt DateTime           @default(now()) @map("requested_at")
+  completedAt DateTime?          @map("completed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("data_deletion_requests")
+}
