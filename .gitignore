@@ -23,3 +23,10 @@ prisma/*.db
 
 # Test coverage
 coverage/
+
+# Không push: dev-only scripts / test config / Claude local state (giữ lại .claude/skills nếu có, dùng chung team)
+scripts/
+test/
+.claude/*
+!.claude/skills
+!.claude/skills/**
