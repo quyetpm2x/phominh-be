@@ -8,10 +8,12 @@ import { LoggerModule } from 'nestjs-pino';
 
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { FirebaseModule } from './integrations/firebase/firebase.module';
 import { SupabaseModule } from './integrations/supabase/supabase.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { TokenModule } from './modules/auth/token.module';
 import { CommentsModule } from './modules/comments/comments.module';
 import { EmergencyModule } from './modules/emergency/emergency.module';
 import { MerchantsModule } from './modules/merchants/merchants.module';
@@ -61,6 +63,8 @@ import { PrismaModule } from './prisma/prisma.module';
     }),
     PrismaModule,
     SupabaseModule,
+    FirebaseModule,
+    TokenModule,
     TrustScoreModule,
     AuthModule,
     UsersModule,

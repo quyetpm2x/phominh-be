@@ -10,6 +10,8 @@ import { Prisma, type Post } from '@prisma/client';
 
 import { SupabaseService } from '../../integrations/supabase/supabase.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { MerchantsService } from '../merchants/merchants.service';
+import { ModerationService } from '../moderation/moderation.service';
 import { UsersService } from '../users/users.service';
 
 import type { CreatePostDto } from './dto/create-post.dto';
@@ -33,13 +35,18 @@ export class PostsService {
     private readonly ranking: RankingService,
     private readonly supabase: SupabaseService,
     private readonly usersService: UsersService,
+    private readonly merchantsService: MerchantsService,
+    private readonly moderationService: ModerationService,
   ) {}
 
   async create(authorId: string, dto: CreatePostDto): Promise<Post> {
-    // TODO(moderation): merchant isLibraryPhoto=true phải xác nhận lại merchantProfile.isVerified
-    // trước khi lưu (bussiness §2.1) — modules/moderation chưa implement, chặn tạm ở review thủ công.
-    // emergency KHÔNG có hạn tự ẩn (null) — chỉ hết hiệu lực qua xác minh đa nguồn (modules/emergency,
-    // chưa implement), không phải hết giờ như 2 loại còn lại.
+    // emergency KHÔNG có hạn tự ẩn (null) — chỉ hết hiệu lực qua xác minh đa nguồn (modules/emergency),
+    // không phải hết giờ như 2 loại còn lại.
+    this.moderationService.checkMockGps(dto.isMockLocation ?? false);
+    if (dto.isLibraryPhoto) {
+      await this.merchantsService.assertVerifiedForLibraryPhoto(authorId);
+    }
+
     let expiresAt: Date | null = null;
     if (dto.postType === 'merchant') {
       expiresAt = new Date(Date.now() + MERCHANT_POST_TTL_HOURS * 60 * 60 * 1000);
@@ -57,6 +64,9 @@ export class PostsService {
         displayMode: dto.displayMode ?? 'alias',
         isLibraryPhoto: dto.isLibraryPhoto ?? false,
         expiresAt,
+        textColor: dto.textColor,
+        backgroundColor: dto.backgroundColor,
+        fontSize: dto.fontSize,
         images: dto.imageUrls?.length
           ? { create: dto.imageUrls.map((url, sortOrder) => ({ url, sortOrder })) }
           : undefined,
@@ -66,11 +76,20 @@ export class PostsService {
     return post;
   }
 
-  // Sửa bài đăng của chính mình (tai-lieu-chuc-nang.md #33) — chỉ sửa content, xem UpdatePostDto vì
-  // sao không cho sửa ảnh/vị trí/loại bài.
+  // Sửa bài đăng của chính mình (tai-lieu-chuc-nang.md #33) — chỉ sửa content + style, xem
+  // UpdatePostDto vì sao không cho sửa ảnh/vị trí/loại bài. Field style không gửi lên = giữ nguyên
+  // giá trị cũ (Prisma bỏ qua field undefined trong data).
   async update(id: string, authorId: string, dto: UpdatePostDto): Promise<Post> {
     const post = await this.findOwnedActivePost(id, authorId);
-    return this.prisma.post.update({ where: { id: post.id }, data: { content: dto.content } });
+    return this.prisma.post.update({
+      where: { id: post.id },
+      data: {
+        content: dto.content,
+        textColor: dto.textColor,
+        backgroundColor: dto.backgroundColor,
+        fontSize: dto.fontSize,
+      },
+    });
   }
 
   // Xoá bài đăng của chính mình — soft delete (status='removed'), tận dụng cột PostStatus có sẵn:
@@ -119,8 +138,9 @@ export class PostsService {
   // vốn cần toạ độ người xem) để 1 PostDetail type dùng chung ở frontend.
   async findOne(id: string) {
     const rows = await this.prisma.$queryRaw<PostRow[]>`
-      select p.id, p.author_id, p.post_type, p.content, p.lat, p.lng, p.display_mode, p.is_library_photo,
+      select p.id, p.author_id, p.post_type, p.status, p.content, p.lat, p.lng, p.display_mode, p.is_library_photo,
         p.vote_count, p.comment_count, p.expires_at, p.created_at,
+        p.text_color, p.background_color, p.font_size,
         u.alias as author_alias, u.real_name as author_real_name,
         (select pi.url from post_images pi where pi.post_id = p.id order by pi.sort_order asc limit 1) as image_url
       from posts p
@@ -148,18 +168,20 @@ export class PostsService {
       : Prisma.empty;
 
     // "Không quan tâm" (tai-lieu-chuc-nang.md #32) — bài của người viewer đã ẩn không xuất hiện lại
-    // trong feed của chính họ.
+    // trong feed của chính họ. TRỪ tin khẩn cấp — không được để lỡ cảnh báo an toàn chỉ vì đã ẩn
+    // người đăng (bussiness §3, bài học vụ Gas app đã nhắc — ưu tiên an toàn hơn sở thích cá nhân).
     const ignoredUserIds = await this.usersService.getIgnoredUserIds(viewerId);
     const ignoredFilter =
       ignoredUserIds.length > 0
-        ? Prisma.sql`and p.author_id not in (${Prisma.join(ignoredUserIds)})`
+        ? Prisma.sql`and (p.post_type = 'emergency' or p.author_id not in (${Prisma.join(ignoredUserIds)}))`
         : Prisma.empty;
 
     // Join users lấy tên hiển thị (PostCard cần tên tác giả) + subquery lấy URL ảnh đầu tiên (feed
     // chỉ cần 1 ảnh thumbnail, không phải toàn bộ mảng images như findOne).
     const rows = await this.prisma.$queryRaw<NearbyRow[]>`
-      select p.id, p.author_id, p.post_type, p.content, p.lat, p.lng, p.display_mode, p.is_library_photo,
+      select p.id, p.author_id, p.post_type, p.status, p.content, p.lat, p.lng, p.display_mode, p.is_library_photo,
         p.vote_count, p.comment_count, p.expires_at, p.created_at,
+        p.text_color, p.background_color, p.font_size,
         u.alias as author_alias, u.real_name as author_real_name,
         (select pi.url from post_images pi where pi.post_id = p.id order by pi.sort_order asc limit 1) as image_url,
         ST_Distance(p.posted_location, ST_SetSRID(ST_MakePoint(${query.lng}, ${query.lat}), 4326)::geography) as distance_m

@@ -26,14 +26,25 @@ model User {
   // Tự sinh UUID — KHÔNG còn bằng auth.users.id của Supabase nữa. OTP đăng nhập/đăng ký do NestJS
   // tự quản lý (auth/otp.service.ts, không dùng Supabase Auth cho user thường — quyết định đổi từ
   // tai-lieu-cong-nghe-backend.md §4.1, xem ghi chú tại đầu module auth/).
-  id           String   @id @default(uuid()) @db.Uuid
-  phoneNumber  String   @unique @map("phone_number")
-  alias        String   @unique // bí danh tự sinh, cố định vĩnh viễn (bussiness §4.3)
-  realName     String?  @map("real_name") // tuỳ chọn, user tự đặt — dùng khi chọn hiển thị "tên thật" cho 1 bài
-  trustScoreE1 Float    @default(0) @map("trust_score_e1") // Lớp 1, chỉ tăng — điểm hiển thị = E1 trừ E2_hiệu_lực tính runtime
-  isBanned     Boolean  @default(false) @map("is_banned")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id                  String        @id @default(uuid()) @db.Uuid
+  phoneNumber         String        @unique @map("phone_number")
+  alias               String        @unique // bí danh tự sinh, cố định vĩnh viễn (bussiness §4.3)
+  realName            String?       @map("real_name") // tuỳ chọn, user tự đặt — dùng khi chọn hiển thị "tên thật" cho 1 bài
+  avatarUrl           String?       @map("avatar_url") // ảnh đại diện (tai-lieu-chuc-nang.md #37) — URL Supabase Storage, bucket "avatars"
+  trustScoreE1        Float         @default(0) @map("trust_score_e1") // Lớp 1, chỉ tăng — điểm hiển thị = E1 trừ E2_hiệu_lực tính runtime
+  // Trạng thái tài khoản (tai-lieu-chuc-nang.md #74) — thay cho isBanned boolean cũ (chỉ 1 mức,
+  // không có lý do). "restricted" tự hết hiệu lực khi qua restrictedUntil, tính runtime lúc đọc,
+  // không cần cron riêng (khác hẳn deletionRequestedAt bên dưới — cái đó cần cron thật vì phải hard
+  // delete, không thể "tự hết hiệu lực" bằng cách đọc).
+  accountStatus       AccountStatus @default(active) @map("account_status")
+  statusReason        String?       @map("status_reason")
+  restrictedUntil     DateTime?     @map("restricted_until")
+  // Yêu cầu xóa tài khoản (tai-lieu-chuc-nang.md #69, #73 — đã hợp nhất 1 luồng, mô hình mềm 30
+  // ngày theo quyết định mới nhất). Set lúc bấm "xóa tài khoản", null lại nếu đăng nhập lại trong
+  // 30 ngày (khôi phục). AccountDeletionCronService hard-delete khi quá hạn.
+  deletionRequestedAt DateTime?     @map("deletion_requested_at")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
 
   appSessions            AppSession[]
   refreshTokens          RefreshToken[]
@@ -52,10 +63,34 @@ model User {
   notifSetting           NotificationDigestSetting?
   emergencyConfirmations EmergencyConfirmation[]
   dataDeletionRequests   DataDeletionRequest[]
-  ignoredUsers           IgnoredUser[]           @relation("IgnoreOwner")
-  ignoredByUsers         IgnoredUser[]           @relation("IgnoreTarget")
+  ignoredUsers           IgnoredUser[]              @relation("IgnoreOwner")
+  ignoredByUsers         IgnoredUser[]              @relation("IgnoreTarget")
+  postViews              PostView[]
+  notifications          Notification[]
+  termsAcceptances       TermsAcceptance[]
 
   @@map("users")
+}
+
+enum AccountStatus {
+  active
+  banned
+  restricted
+}
+
+// Xác nhận đồng ý Điều khoản, có lưu vết (tai-lieu-chuc-nang.md #67, bắt buộc theo NĐ 13/2023) —
+// lưu MỖI lần đồng ý (không ghi đè), giữ lịch sử đầy đủ nếu điều khoản đổi version sau này và cần
+// user đồng ý lại.
+model TermsAcceptance {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  version    String
+  acceptedAt DateTime @default(now()) @map("accepted_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, acceptedAt])
+  @@map("terms_acceptances")
 }
 
 // Tính năng "Không quan tâm" (tai-lieu-chuc-nang.md #32) — ẩn thầm lặng 1 người, chỉ ảnh hưởng feed
@@ -158,6 +193,12 @@ enum PostStatus {
   expired
 }
 
+enum PostFontSize {
+  small
+  medium
+  large
+}
+
 model Post {
   id                  String                                 @id @default(uuid()) @db.Uuid
   authorId            String                                 @map("author_id") @db.Uuid
@@ -169,6 +210,14 @@ model Post {
   displayMode         DisplayMode                            @default(alias) @map("display_mode")
   isLibraryPhoto      Boolean                                @default(false) @map("is_library_photo") // chỉ true hợp lệ cho merchant đã xác minh
   status              PostStatus                             @default(active)
+  // Style toàn bộ nội dung (tai-lieu-chuc-nang.md #22, giống Instagram/Threads Story text tool — 1
+  // style áp dụng cho CẢ đoạn text, không phải rich text nhiều style/đoạn). null = giao diện mặc
+  // định hiện tại (không đổi gì). textColor/backgroundColor là mã hex, validate ở CreatePostDto/
+  // UpdatePostDto — chỉ nhận đúng format hex để tránh chèn giá trị lạ vào style CSS khi admin panel
+  // (web) render lại.
+  textColor           String?                                @map("text_color")
+  backgroundColor     String?                                @map("background_color")
+  fontSize            PostFontSize?                          @map("font_size")
   voteCount           Int                                    @default(0) @map("vote_count") // cache, cộng dồn từ Vote để đọc nhanh
   commentCount        Int                                    @default(0) @map("comment_count")
   expiresAt           DateTime?                              @map("expires_at") // null = khẩn cấp (không tự hết hạn tới khi giải quyết)
@@ -182,9 +231,26 @@ model Post {
   votes                  Vote[]                  @relation("VoteOnPost")
   emergencyConfirmations EmergencyConfirmation[]
   reports                Report[]
+  views                  PostView[]
 
   @@index([status, postType, expiresAt])
   @@map("posts")
+}
+
+// Thống kê "ai đã xem bài" (tai-lieu-chuc-nang.md #44) — CHỈ hiện TỔNG SỐ, không hiện danh sách
+// từng người xem (đã chốt với user — đánh đổi quyền riêng tư người xem). unique [postId, viewerId]
+// nên xem lại nhiều lần vẫn tính 1, không phóng đại số liệu.
+model PostView {
+  id       String   @id @default(uuid()) @db.Uuid
+  postId   String   @map("post_id") @db.Uuid
+  viewerId String   @map("viewer_id") @db.Uuid
+  viewedAt DateTime @default(now()) @map("viewed_at")
+
+  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  viewer User @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, viewerId])
+  @@map("post_views")
 }
 
 model PostImage {
@@ -255,6 +321,11 @@ model EmergencyConfirmation {
   id          String   @id @default(uuid()) @db.Uuid
   postId      String   @map("post_id") @db.Uuid
   confirmerId String   @map("confirmer_id") @db.Uuid
+  // GPS lúc xác nhận (tai-lieu-chuc-nang.md #7e) — dùng để kiểm tra "trong bán kính nhỏ" quanh bài,
+  // đúng tinh thần "xác nhận độc lập tại chỗ" thay vì xác nhận từ xa (bussiness §3). Nullable vì cột
+  // mới thêm sau — mọi xác nhận MỚI từ nay đều bắt buộc gửi qua ConfirmEmergencyDto.
+  lat         Float?
+  lng         Float?
   createdAt   DateTime @default(now()) @map("created_at")
 
   post      Post @relation(fields: [postId], references: [id], onDelete: Cascade)
@@ -643,11 +714,34 @@ model NotificationDigestSetting {
   frequency       NotifFrequency @default(weekly)
   quietHoursStart String?        @map("quiet_hours_start")
   quietHoursEnd   String?        @map("quiet_hours_end")
+  // "Loại thông báo" (tai-lieu-chuc-nang.md #48) — tắt/bật riêng thông báo có bình luận mới trên
+  // bài của mình, độc lập với frequency (frequency chỉ chi phối BẢN TIN gộp theo tuần/ngày). Kết
+  // quả xử lý report (#49) KHÔNG có cờ riêng — luôn gửi, theo đúng thiết kế UI gốc (settings/
+  // notifications.tsx không có toggle cho mục này).
+  notifyComments  Boolean        @default(true) @map("notify_comments")
   updatedAt       DateTime       @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notification_digest_settings")
+}
+
+// Trung tâm thông báo trong app (tai-lieu-chuc-nang.md #47, #49) — tách khỏi PushToken (thiết bị)
+// và NotificationDigestSetting (cấu hình): đây là NỘI DUNG từng thông báo đã gửi, để liệt kê lại.
+model Notification {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  type        String // 'comment_on_post' | 'report_result' — string thay vì enum, dễ thêm loại mới không cần migration
+  title       String
+  body        String
+  referenceId String?  @map("reference_id") @db.Uuid // postId/reportId liên quan, tuỳ type — FE tự điều hướng theo type
+  isRead      Boolean  @default(false) @map("is_read")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
 }
 
 // ===================== THỐNG KÊ & PHÁP LÝ =====================
@@ -667,6 +761,7 @@ enum DataDeletionStatus {
   requested
   processing
   completed
+  cancelled // user đăng nhập lại trong 30 ngày => khôi phục, huỷ yêu cầu (tai-lieu-chuc-nang.md #69/#73)
 }
 
 model DataDeletionRequest {

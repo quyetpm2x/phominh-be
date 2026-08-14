@@ -8,8 +8,13 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  Matches,
   MaxLength,
 } from 'class-validator';
+
+// Chỉ nhận đúng #RRGGBB — chặn giá trị lạ lọt vào style CSS khi admin panel (web) render lại nội
+// dung bài đăng (tránh CSS injection kiểu "red; background:url(...)").
+export const HEX_COLOR_REGEX = /^#[0-9A-Fa-f]{6}$/;
 
 export class CreatePostDto {
   @ApiProperty({ enum: ['life', 'merchant', 'emergency'] })
@@ -52,4 +57,29 @@ export class CreatePostDto {
   @IsArray()
   @IsUrl({}, { each: true })
   imageUrls?: string[];
+
+  // Style áp dụng cho TOÀN BỘ nội dung (tai-lieu-chuc-nang.md #22) — giống Instagram/Threads Story
+  // text tool, không phải rich text nhiều style/đoạn. null/không gửi = giao diện mặc định.
+  @ApiPropertyOptional({ description: 'Mã hex #RRGGBB, vd #FFFFFF' })
+  @IsOptional()
+  @Matches(HEX_COLOR_REGEX, { message: 'textColor phải là mã hex dạng #RRGGBB' })
+  textColor?: string;
+
+  @ApiPropertyOptional({ description: 'Mã hex #RRGGBB, vd #1F6F52' })
+  @IsOptional()
+  @Matches(HEX_COLOR_REGEX, { message: 'backgroundColor phải là mã hex dạng #RRGGBB' })
+  backgroundColor?: string;
+
+  @ApiPropertyOptional({ enum: ['small', 'medium', 'large'] })
+  @IsOptional()
+  @IsIn(['small', 'medium', 'large'])
+  fontSize?: 'small' | 'medium' | 'large';
+
+  // Chống giả mạo GPS (tai-lieu-chuc-nang.md #7a) — client tự báo cờ mocked location của thiết bị
+  // (expo-location Location.mocked, chỉ đáng tin trên Android). Không gửi = coi như false (client
+  // cũ chưa cập nhật vẫn đăng bài được, không phá luồng hiện tại).
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  isMockLocation?: boolean;
 }

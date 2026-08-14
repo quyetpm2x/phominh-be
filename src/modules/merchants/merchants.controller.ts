@@ -26,6 +26,16 @@ export class MerchantsController {
     return this.merchantsService.getMine(user.id);
   }
 
+  @Get('me/dashboard')
+  getDashboard(@CurrentUser() user: AuthenticatedUser) {
+    return this.merchantsService.getDashboard(user.id);
+  }
+
+  @Get('me/stats')
+  getStats(@CurrentUser() user: AuthenticatedUser) {
+    return this.merchantsService.getStats(user.id);
+  }
+
   @Patch('me/phone-visibility')
   updatePhoneVisibility(
     @CurrentUser() user: AuthenticatedUser,

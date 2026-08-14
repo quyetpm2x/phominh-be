@@ -50,6 +50,15 @@ export class CommentsController {
     return this.commentsService.setPinned(postId, commentId, user.id, true);
   }
 
+  @Patch(':commentId/unpin')
+  unpin(
+    @Param('postId') postId: string,
+    @Param('commentId') commentId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.commentsService.setPinned(postId, commentId, user.id, false);
+  }
+
   @Patch(':commentId/hide')
   hide(
     @Param('postId') postId: string,

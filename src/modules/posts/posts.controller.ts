@@ -24,6 +24,8 @@ import { JwtAuthGuard, type AuthenticatedUser } from '../../common/guards/jwt-au
 import { CreatePostDto } from './dto/create-post.dto';
 import { NearbyQueryDto } from './dto/nearby-query.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
+import { PostAuthorQueryService } from './post-author-query.service';
+import { PostViewsService } from './post-views.service';
 import { PostsService } from './posts.service';
 
 const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -33,7 +35,11 @@ const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 @UseGuards(JwtAuthGuard)
 @Controller('api/mobile/posts')
 export class PostsController {
-  constructor(private readonly postsService: PostsService) {}
+  constructor(
+    private readonly postsService: PostsService,
+    private readonly postViewsService: PostViewsService,
+    private readonly postAuthorQueryService: PostAuthorQueryService,
+  ) {}
 
   @Post()
   create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreatePostDto) {
@@ -62,6 +68,19 @@ export class PostsController {
     return this.postsService.findNearby(query, user.id);
   }
 
+  // "Bài đã đăng" trong hồ sơ (tai-lieu-chuc-nang.md #35) — ĐẶT TRƯỚC ':id' bên dưới, nếu không
+  // 'mine' sẽ bị ':id' nuốt mất (Nest khớp route theo thứ tự khai báo).
+  @Get('mine')
+  findMine(@CurrentUser() user: AuthenticatedUser) {
+    return this.postAuthorQueryService.findMine(user.id);
+  }
+
+  // Bài công khai của người khác, dùng ở hồ sơ công khai (tai-lieu-chuc-nang.md #36).
+  @Get('by-user/:userId')
+  findByAuthor(@Param('userId') userId: string) {
+    return this.postAuthorQueryService.findByAuthor(userId);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.postsService.findOne(id);
@@ -80,5 +99,17 @@ export class PostsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.postsService.remove(id, user.id);
+  }
+
+  // Thống kê "ai đã xem bài" (tai-lieu-chuc-nang.md #44) — client gọi khi mở màn chi tiết.
+  @Post(':id/views')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  recordView(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.postViewsService.recordView(id, user.id);
+  }
+
+  @Get(':id/views/count')
+  getViewCount(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.postViewsService.getViewCount(id, user.id);
   }
 }

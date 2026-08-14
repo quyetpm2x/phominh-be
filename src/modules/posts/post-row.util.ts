@@ -2,6 +2,7 @@ export interface PostRow {
   id: string;
   author_id: string;
   post_type: 'life' | 'merchant' | 'emergency';
+  status: 'active' | 'removed' | 'expired';
   content: string;
   lat: number;
   lng: number;
@@ -11,6 +12,9 @@ export interface PostRow {
   comment_count: number;
   expires_at: Date | null;
   created_at: Date;
+  text_color: string | null;
+  background_color: string | null;
+  font_size: 'small' | 'medium' | 'large' | null;
   author_alias: string;
   author_real_name: string | null;
   image_url: string | null;
@@ -32,6 +36,7 @@ export function toBaseSummary(row: PostRow) {
         ? (row.author_real_name ?? row.author_alias)
         : row.author_alias,
     postType: row.post_type,
+    status: row.status,
     content: row.content,
     lat: row.lat,
     lng: row.lng,
@@ -42,6 +47,9 @@ export function toBaseSummary(row: PostRow) {
     expiresAt: row.expires_at,
     createdAt: row.created_at,
     imageUrl: row.image_url,
+    textColor: row.text_color,
+    backgroundColor: row.background_color,
+    fontSize: row.font_size,
   };
 }
 

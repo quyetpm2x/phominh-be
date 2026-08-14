@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -31,5 +31,21 @@ export class NotificationsController {
     @Body() dto: UpdateNotificationSettingsDto,
   ) {
     return this.notificationsService.updateDigestSettings(user.id, dto);
+  }
+
+  // Danh sách thông báo (tai-lieu-chuc-nang.md #47).
+  @Get()
+  list(@CurrentUser() user: AuthenticatedUser) {
+    return this.notificationsService.listNotifications(user.id);
+  }
+
+  @Patch(':id/read')
+  markAsRead(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.notificationsService.markAsRead(user.id, id);
+  }
+
+  @Patch('read-all')
+  markAllAsRead(@CurrentUser() user: AuthenticatedUser) {
+    return this.notificationsService.markAllAsRead(user.id);
   }
 }

@@ -1,21 +1,26 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import type { FixedArea, User } from '@prisma/client';
 
 import { generateAliasCandidate } from '../../common/utils/alias-generator';
+import { SupabaseService } from '../../integrations/supabase/supabase.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TrustScoreService } from '../votes/trust-score.service';
 
 import type { SetFixedAreaDto } from './dto/set-fixed-area.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
 import type { UserProfileDto } from './dto/user-profile.dto';
+import type { UserPublicProfileDto } from './dto/user-public-profile.dto';
 
 const ALIAS_GENERATION_MAX_ATTEMPTS = 10;
+const AVATAR_BUCKET = 'avatars';
+const ALLOWED_AVATAR_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 @Injectable()
 export class UsersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly trustScore: TrustScoreService,
+    private readonly supabase: SupabaseService,
   ) {}
 
   // Gọi từ AuthService ngay sau khi OtpService.verifyOtp xác nhận đúng mã — SĐT là danh tính duy
@@ -38,6 +43,7 @@ export class UsersService {
       id: user.id,
       alias: user.alias,
       realName: user.realName,
+      avatarUrl: user.avatarUrl,
       trustTier: tier,
       trustBadgeLabel: this.trustScore.getBadgeLabel(tier),
       pointsToNextTier: weightTierCapped ? this.pointsToNextTier(displayScore, tier) : null,
@@ -47,6 +53,50 @@ export class UsersService {
 
   async updateProfile(userId: string, dto: UpdateProfileDto): Promise<User> {
     return this.prisma.user.update({ where: { id: userId }, data: { realName: dto.realName } });
+  }
+
+  // Hồ sơ công khai người khác (tai-lieu-chuc-nang.md #36) — KHÔNG trả realName, xem comment ở
+  // UserPublicProfileDto vì sao.
+  async getPublicProfile(userId: string): Promise<UserPublicProfileDto> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Không tìm thấy người dùng');
+
+    const [displayScore, postCount] = await Promise.all([
+      this.getDisplayTrustScore(userId),
+      this.prisma.post.count({ where: { authorId: userId, status: 'active' } }),
+    ]);
+    const tier = this.trustScore.getBadgeTier(displayScore);
+
+    return {
+      id: user.id,
+      alias: user.alias,
+      avatarUrl: user.avatarUrl,
+      trustBadgeLabel: this.trustScore.getBadgeLabel(tier),
+      postCount,
+      createdAt: user.createdAt,
+    };
+  }
+
+  // Ảnh đại diện (tai-lieu-chuc-nang.md #37) — khác POST /posts/images (upload xong còn phải gắn
+  // vào CreatePostDto ở bước sau): avatar là 1:1 nên upload xong gán thẳng vào User luôn, không cần
+  // bước 2.
+  async updateAvatar(userId: string, file: Express.Multer.File): Promise<{ avatarUrl: string }> {
+    if (!ALLOWED_AVATAR_MIME_TYPES.has(file.mimetype)) {
+      throw new BadRequestException('Chỉ nhận ảnh JPEG/PNG/WebP');
+    }
+    const extension = file.mimetype.split('/')[1];
+    const path = `${userId}/${Date.now()}.${extension}`;
+
+    const { error } = await this.supabase.client.storage
+      .from(AVATAR_BUCKET)
+      .upload(path, file.buffer, { contentType: file.mimetype, upsert: true });
+    if (error) {
+      throw new BadRequestException(`Upload ảnh thất bại: ${error.message}`);
+    }
+
+    const { data } = this.supabase.client.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+    await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl: data.publicUrl } });
+    return { avatarUrl: data.publicUrl };
   }
 
   async setFixedArea(userId: string, dto: SetFixedAreaDto): Promise<FixedArea> {

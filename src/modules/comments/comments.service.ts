@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import type { Comment, CommentVisibility } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 import type { CreateCommentDto } from './dto/create-comment.dto';
 import type { UpdateCommentDto } from './dto/update-comment.dto';
@@ -23,7 +24,10 @@ export interface CommentSummary {
 
 @Injectable()
 export class CommentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async create(postId: string, authorId: string, dto: CreateCommentDto): Promise<Comment> {
     const post = await this.prisma.post.findUnique({ where: { id: postId } });
@@ -53,7 +57,35 @@ export class CommentsService {
       where: { id: postId },
       data: { commentCount: { increment: 1 } },
     });
+    if (post.authorId !== authorId) {
+      await this.notifyPostOwner(postId, post.authorId, authorId, comment.content);
+    }
     return comment;
+  }
+
+  // Thông báo bình luận mới (tai-lieu-chuc-nang.md #47/#48) — tôn trọng cờ notifyComments (mặc
+  // định bật), kể cả bình luận riêng tư (visibility='private') vẫn báo, vì đó CHÍNH LÀ kênh chủ bài
+  // biết có người hỏi riêng.
+  private async notifyPostOwner(
+    postId: string,
+    postAuthorId: string,
+    commenterId: string,
+    content: string,
+  ): Promise<void> {
+    const setting = await this.prisma.notificationDigestSetting.findUnique({
+      where: { userId: postAuthorId },
+    });
+    if (setting && !setting.notifyComments) return;
+
+    const commenter = await this.prisma.user.findUniqueOrThrow({ where: { id: commenterId } });
+    const preview = content.length > 80 ? `${content.slice(0, 80)}…` : content;
+    await this.notifications.createNotification(
+      postAuthorId,
+      'comment_on_post',
+      `${commenter.alias} vừa bình luận trên bài của bạn`,
+      preview,
+      postId,
+    );
   }
 
   async findForPost(postId: string, viewerId: string): Promise<CommentSummary[]> {

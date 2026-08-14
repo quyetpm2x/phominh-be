@@ -6,5 +6,6 @@ import { ModerationService } from './moderation.service';
 @Module({
   controllers: [ModerationController],
   providers: [ModerationService],
+  exports: [ModerationService],
 })
 export class ModerationModule {}

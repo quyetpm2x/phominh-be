@@ -1,14 +1,20 @@
-import { Injectable, NotImplementedException } from '@nestjs/common';
-import type { NotificationDigestSetting, PushToken } from '@prisma/client';
+import { Injectable } from '@nestjs/common';
+import type { Notification, NotificationDigestSetting, PushToken } from '@prisma/client';
 
+import { FirebasePushService } from '../../integrations/firebase/firebase-push.service';
 import { PrismaService } from '../../prisma/prisma.service';
 
 import type { RegisterPushTokenDto } from './dto/register-push-token.dto';
 import type { UpdateNotificationSettingsDto } from './dto/update-notification-settings.dto';
 
+const NOTIFICATION_PAGE_SIZE = 50;
+
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly firebasePush: FirebasePushService,
+  ) {}
 
   async registerPushToken(userId: string, dto: RegisterPushTokenDto): Promise<PushToken> {
     return this.prisma.pushToken.upsert({
@@ -35,11 +41,45 @@ export class NotificationsService {
     });
   }
 
-  // Gửi thật qua Firebase Cloud Messaging — chưa nối (bussiness §7). Khi bật BullMQ (jobs/README.md),
-  // "gửi digest thông báo" chạy như 1 job cron gọi hàm này theo batch, không gọi đồng bộ trong request.
-  sendPush(_userId: string, _title: string, _body: string): Promise<void> {
-    throw new NotImplementedException(
-      'NotificationsService.sendPush chưa nối Firebase Cloud Messaging thật',
-    );
+  // Trung tâm thông báo trong app (tai-lieu-chuc-nang.md #47, #49) — LUÔN ghi vào bảng notifications
+  // để liệt kê lại được, kèm gửi push best-effort (lỗi push không được làm hỏng luồng gọi hàm này,
+  // xem FirebasePushService.send — tự nuốt lỗi, không throw).
+  async createNotification(
+    userId: string,
+    type: string,
+    title: string,
+    body: string,
+    referenceId?: string,
+  ): Promise<Notification> {
+    const notification = await this.prisma.notification.create({
+      data: { userId, type, title, body, referenceId },
+    });
+
+    const tokens = await this.prisma.pushToken.findMany({ where: { userId } });
+    await Promise.all(tokens.map((t) => this.firebasePush.send(t.token, title, body)));
+
+    return notification;
+  }
+
+  async listNotifications(userId: string): Promise<Notification[]> {
+    return this.prisma.notification.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: NOTIFICATION_PAGE_SIZE,
+    });
+  }
+
+  async markAsRead(userId: string, notificationId: string): Promise<void> {
+    await this.prisma.notification.updateMany({
+      where: { id: notificationId, userId },
+      data: { isRead: true },
+    });
+  }
+
+  async markAllAsRead(userId: string): Promise<void> {
+    await this.prisma.notification.updateMany({
+      where: { userId, isRead: false },
+      data: { isRead: true },
+    });
   }
 }

@@ -6,6 +6,7 @@ export class UserProfileDto {
   @ApiProperty() id!: string;
   @ApiProperty() alias!: string;
   @ApiProperty({ required: false, nullable: true }) realName!: string | null;
+  @ApiProperty({ required: false, nullable: true }) avatarUrl!: string | null;
   @ApiProperty() trustTier!: number;
   @ApiProperty() trustBadgeLabel!: string;
   @ApiProperty({

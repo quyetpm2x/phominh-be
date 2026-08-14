@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString } from 'class-validator';
 
 export class UpdateNotificationSettingsDto {
   // Mặc định 1 lần/tuần — gom lại theo đợt, tránh báo ngay từng tin gây phiền (bussiness §2.1).
@@ -17,4 +17,10 @@ export class UpdateNotificationSettingsDto {
   @IsOptional()
   @IsString()
   quietHoursEnd?: string;
+
+  // "Loại thông báo" (tai-lieu-chuc-nang.md #48) — độc lập với frequency.
+  @ApiPropertyOptional({ description: 'Nhận thông báo khi có bình luận mới trên bài của mình' })
+  @IsOptional()
+  @IsBoolean()
+  notifyComments?: boolean;
 }

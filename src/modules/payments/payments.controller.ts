@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -22,6 +22,14 @@ export class PaymentsController {
   @Post('mobile/merchants/:merchantId/subscriptions')
   createSubscription(@Param('merchantId') merchantId: string, @Body() dto: CreateSubscriptionDto) {
     return this.paymentsService.createSubscription(merchantId, dto);
+  }
+
+  // Lịch sử thanh toán gói merchant (tai-lieu-chuc-nang.md #46).
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Get('mobile/merchants/me/payments')
+  getPaymentHistory(@CurrentUser() user: AuthenticatedUser) {
+    return this.paymentsService.getPaymentHistory(user.id);
   }
 
   @ApiBearerAuth()

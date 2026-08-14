@@ -7,11 +7,11 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { OtpCleanupService } from './otp-cleanup.service';
 import { OtpService } from './otp.service';
-import { TokenService } from './token.service';
 
 @Module({
   imports: [UsersModule],
   controllers: [AuthController],
-  providers: [AuthService, OtpService, TokenService, SmsOtpService, OtpCleanupService],
+  // TokenService giờ đến từ TokenModule (@Global, xem app.module.ts) — không khai báo lại ở đây.
+  providers: [AuthService, OtpService, SmsOtpService, OtpCleanupService],
 })
 export class AuthModule {}

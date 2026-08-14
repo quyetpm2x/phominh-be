@@ -80,6 +80,19 @@ export class PaymentsService {
     });
   }
 
+  // Lịch sử thanh toán gói merchant (tai-lieu-chuc-nang.md #46) — kèm luôn subscription liên quan
+  // (planKey, hạn dùng) để FE không phải gọi thêm API.
+  async getPaymentHistory(userId: string) {
+    const merchant = await this.prisma.merchantProfile.findUnique({ where: { userId } });
+    if (!merchant) throw new NotFoundException('Chưa có hồ sơ quán');
+
+    return this.prisma.paymentTransaction.findMany({
+      where: { merchantId: merchant.id },
+      orderBy: { createdAt: 'desc' },
+      include: { subscription: { select: { planKey: true, expiresAt: true } } },
+    });
+  }
+
   // Admin duyệt — gọi thẳng MomoPayoutService stub nên sẽ ném NotImplementedException tới khi nối
   // API thật. Tách riêng khỏi requestPayout() đúng nguyên tắc "app không giữ tiền ở giữa".
   async processPayout(payoutRequestId: string) {

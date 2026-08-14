@@ -56,6 +56,26 @@ export class TokenService {
     return this.issueTokenPair(record.user.id, record.user.phoneNumber);
   }
 
+  // Đăng xuất (tai-lieu-chuc-nang.md #72) — thu hồi ĐÚNG refresh token của thiết bị đang đăng xuất,
+  // không đụng tới các thiết bị khác. Không lỗi nếu token không tìm thấy/đã revoke — đăng xuất phải
+  // luôn "thành công" từ góc nhìn client dù token đã hết hiệu lực từ trước.
+  async revokeToken(rawToken: string): Promise<void> {
+    const tokenHash = this.hashRefreshToken(rawToken);
+    await this.prisma.refreshToken.updateMany({
+      where: { tokenHash, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  // Thu hồi TOÀN BỘ refresh token của 1 user — dùng khi khoá tài khoản (admin) hoặc yêu cầu xoá tài
+  // khoản (tai-lieu-chuc-nang.md #69/#73), ép đăng xuất khỏi mọi thiết bị ngay lập tức.
+  async revokeAllForUser(userId: string): Promise<void> {
+    await this.prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
   private signAccessToken(userId: string, phone: string): string {
     const secret = this.config.getOrThrow<string>('USER_JWT_SECRET');
     // Number() bắt buộc: ConfigService.get<number>() không tự ép kiểu, trả về string thô từ env —

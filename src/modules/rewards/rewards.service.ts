@@ -19,7 +19,7 @@ export class RewardsService {
   // TODO khi có traction thật; tránh N+1 query tính effective score cho từng dòng ở base scaffold.
   async getLeaderboard(): Promise<{ id: string; alias: string; trustScoreE1: number }[]> {
     return this.prisma.user.findMany({
-      where: { isBanned: false },
+      where: { accountStatus: 'active' },
       orderBy: { trustScoreE1: 'desc' },
       take: LEADERBOARD_LIMIT,
       select: { id: true, alias: true, trustScoreE1: true },
