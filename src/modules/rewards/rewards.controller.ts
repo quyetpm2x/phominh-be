@@ -14,11 +14,6 @@ import { RewardsService } from './rewards.service';
 export class RewardsController {
   constructor(private readonly rewardsService: RewardsService) {}
 
-  @Get('leaderboard')
-  getLeaderboard() {
-    return this.rewardsService.getLeaderboard();
-  }
-
   @Get('referral-code')
   getReferralCode(@CurrentUser() user: AuthenticatedUser) {
     return this.rewardsService.getOrCreateReferralCode(user.id);

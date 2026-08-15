@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -51,6 +51,16 @@ export class AccountLifecycleController {
   @Get('mobile/users/me/deletion-request')
   getDeletionStatus(@CurrentUser() user: AuthenticatedUser) {
     return this.accountLifecycle.getDeletionStatus(user.id);
+  }
+
+  // Tra cứu trước khi khoá (tai-lieu-chuc-nang.md #95) — admin nhập SĐT hoặc mã tài khoản (UUID) để
+  // tìm đúng người trước khi bấm khoá/mở khoá bên dưới.
+  @ApiBearerAuth()
+  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @RequirePermission('manage_user_lock')
+  @Get('admin/users/lookup')
+  lookupUser(@Query('query') query: string) {
+    return this.accountLifecycle.findByPhoneOrId(query);
   }
 
   // Admin khoá/hạn chế/mở lại — quyền manage_user_lock (đã seed sẵn, xem scripts/create-owner.ts).

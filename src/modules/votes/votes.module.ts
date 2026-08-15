@@ -11,5 +11,6 @@ import { VotesService } from './votes.service';
   imports: [UsersModule],
   controllers: [VotesController],
   providers: [VotesService],
+  exports: [VotesService],
 })
 export class VotesModule {}

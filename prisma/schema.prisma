@@ -39,6 +39,13 @@ model User {
   accountStatus       AccountStatus @default(active) @map("account_status")
   statusReason        String?       @map("status_reason")
   restrictedUntil     DateTime?     @map("restricted_until")
+  // Opt-in kiếm tiền (bussiness §5.1a) — 2 công tắc ĐỘC LẬP, tắt mặc định cho mọi user. E1/E2 vẫn
+  // tính cho mọi user bất kể 2 cờ này (đây chỉ quyết định có được QUY ĐỔI thành tiền thật hay không).
+  earnViaPostsEnabled Boolean       @default(false) @map("earn_via_posts_enabled")
+  affiliateEnabled    Boolean       @default(false) @map("affiliate_enabled")
+  // Mốc bật GẦN NHẤT của 1 trong 2 công tắc trên — KHÔNG hồi tố (chỉ tính thưởng từ mốc này trở đi).
+  // Tắt rồi bật lại = mốc mới, không khôi phục mốc cũ (bussiness §5.1a).
+  earnEnabledAt       DateTime?     @map("earn_enabled_at")
   // Yêu cầu xóa tài khoản (tai-lieu-chuc-nang.md #69, #73 — đã hợp nhất 1 luồng, mô hình mềm 30
   // ngày theo quyết định mới nhất). Set lúc bấm "xóa tài khoản", null lại nếu đăng nhập lại trong
   // 30 ngày (khôi phục). AccountDeletionCronService hard-delete khi quá hạn.
@@ -59,6 +66,9 @@ model User {
   bankAccounts           UserBankAccount[]
   payoutRequests         PayoutRequest[]
   rewardLedger           RewardLedger[]
+  rewardWallet           RewardWallet?
+  monthlyTierSnapshots   MonthlyTierSnapshot[]
+  leaderboardSnapshots   LeaderboardSnapshot[]
   pushTokens             PushToken[]
   notifSetting           NotificationDigestSetting?
   emergencyConfirmations EmergencyConfirmation[]
@@ -222,6 +232,10 @@ model Post {
   commentCount        Int                                    @default(0) @map("comment_count")
   expiresAt           DateTime?                              @map("expires_at") // null = khẩn cấp (không tự hết hạn tới khi giải quyết)
   emergencyVerifiedAt DateTime?                              @map("emergency_verified_at") // đạt đủ ngưỡng xác nhận độc lập (bussiness §3, §7D.1 #6) — null = chưa đủ, chỉ hiện hẹp
+  // Admin đánh dấu tình huống khẩn cấp đã qua (VD "mất điện đã có lại") — KHÁC hẳn
+  // emergencyVerifiedAt (xác nhận đây là tin THẬT). 1 bài có thể verified nhưng chưa resolved
+  // (đang xử lý), hoặc admin resolve thủ công dù chưa đủ ngưỡng verified (tai-lieu-chuc-nang.md #90).
+  emergencyResolvedAt DateTime?                              @map("emergency_resolved_at")
   createdAt           DateTime                               @default(now()) @map("created_at")
   updatedAt           DateTime                               @updatedAt @map("updated_at")
 
@@ -343,11 +357,22 @@ enum TrustScoreSourceType {
   appeal_reversal
 }
 
+// Mức độ vi phạm — cùng danh sách với ViolationSeverity (votes/trust-score.service.ts), tách enum
+// Prisma riêng vì union type TS không map thẳng được vào cột DB.
+enum ViolationSeverity {
+  light
+  medium
+  severe
+}
+
 model TrustScoreHistory {
   id                 String               @id @default(uuid()) @db.Uuid
   userId             String               @map("user_id") @db.Uuid
   delta              Float
   sourceType         TrustScoreSourceType @map("source_type")
+  // Chỉ set khi sourceType = violation_confirmed — dùng tính "Hệ số không vi phạm" trong công thức
+  // xếp hạng thưởng (bussiness §5.1b): tổng_trọng_lượng = Nhẹ×1 + Trung_bình×2 + Nghiêm_trọng×5.
+  severity           ViolationSeverity?
   referenceId        String?              @map("reference_id") @db.Uuid
   confirmedByAdminId String?              @map("confirmed_by_admin_id") @db.Uuid
   createdAt          DateTime             @default(now()) @map("created_at")
@@ -642,14 +667,19 @@ model PayoutRequest {
 enum RewardLedgerType {
   leaderboard
   referral
+  // Giữ lại giá trị này để không phá migration nếu đã có dòng cũ dùng nó — bussiness §5.1e đã CHỐT
+  // bỏ hẳn mô hình voucher, chỉ còn tiền mặt qua Momo/VNPay, KHÔNG dùng cho dữ liệu mới.
   redeemed_voucher
   payout
 }
 
+// amount tính bằng ĐỒNG (VND) trực tiếp — không phải điểm quy đổi (bussiness §5.1 đã CHỐT bỏ lớp
+// voucher/điểm trung gian, xem RewardLedgerType.redeemed_voucher ở trên). Dương = cộng ví (thưởng
+// leaderboard/referral), âm = trừ ví (payout đã rút hoặc trừ ngược điểm khẩn cấp gian lận).
 model RewardLedger {
   id          String           @id @default(uuid()) @db.Uuid
   userId      String           @map("user_id") @db.Uuid
-  amount      Int // điểm ví quy đổi, không phải tiền thật
+  amount      Int
   type        RewardLedgerType
   referenceId String?          @map("reference_id")
   createdAt   DateTime         @default(now()) @map("created_at")
@@ -657,6 +687,57 @@ model RewardLedger {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("reward_ledger")
+}
+
+// Số dư ví thưởng (bussiness §5.1) — denormalized từ tổng RewardLedger.amount, cùng convention cache
+// như User.trustScoreE1/Post.voteCount — cập nhật ATOMIC cùng transaction với mỗi dòng ledger mới,
+// tránh phải SUM toàn bộ lịch sử ledger mỗi lần đọc số dư.
+model RewardWallet {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  balance   Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("reward_wallets")
+}
+
+// Khoá bậc huy hiệu đầu tháng — Phương án B đã chốt (bussiness §5.1b): xếp hạng thưởng dùng bậc TẠI
+// THỜI ĐIỂM ĐẦU THÁNG, cố định suốt tháng dù huy hiệu hiển thị công khai vẫn cập nhật real-time theo
+// bậc thật. Ghi bởi cron chạy đầu mỗi tháng cho MỌI user đang active (kể cả không bật kiếm tiền — chỉ
+// lọc theo cờ earn khi tổng hợp bảng xếp hạng, không lọc ở bước khoá bậc để đơn giản hoá cron).
+model MonthlyTierSnapshot {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  period           String // "YYYY-MM"
+  tierAtMonthStart Int      @map("tier_at_month_start")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, period])
+  @@map("monthly_tier_snapshots")
+}
+
+// Kết quả CHÍNH THỨC 1 kỳ (tháng) × 1 bậc — ghi bởi cron chốt bảng cuối tháng, đọc lại cho màn hình
+// lịch sử thưởng. score là điểm xếp hạng cuối cùng (đã nhân trọng số + hệ số không vi phạm),
+// rewardAmount null nếu bậc chưa kích hoạt trả thưởng (chưa đạt mốc 100 user, bussiness §5.1c).
+model LeaderboardSnapshot {
+  id           String   @id @default(uuid()) @db.Uuid
+  period       String // "YYYY-MM"
+  tier         Int
+  userId       String   @map("user_id") @db.Uuid
+  score        Float
+  rank         Int
+  rewardAmount Int?     @map("reward_amount")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([period, tier, userId])
+  @@index([period, tier, rank])
+  @@map("leaderboard_snapshots")
 }
 
 model ReferralCode {
@@ -774,4 +855,24 @@ model DataDeletionRequest {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("data_deletion_requests")
+}
+
+// ===================== MARKETING (web tiếp thị domain chính) =====================
+
+// Lead từ 3 form CÔNG KHAI trên web marketing (tai-lieu-chuc-nang.md #75-83): 'merchant_signup'
+// (đăng ký quán ở /merchant), 'pilot_area_signup' (để lại SĐT chờ mở khu mới ở trang chủ),
+// 'contact' (form Liên hệ). type dùng String thay vì enum — cùng lý do Notification.type ở trên
+// (dễ thêm loại form mới không cần migration). payload giữ linh hoạt vì mỗi loại có field khác
+// nhau (businessName/phoneNumber/address vs phoneNumber vs name/contact/message).
+model MarketingLead {
+  id        String    @id @default(uuid()) @db.Uuid
+  type      String
+  payload   Json
+  createdAt DateTime  @default(now()) @map("created_at")
+  // null = chưa ai liên hệ lại — đánh dấu thủ công (Prisma Studio/SQL), CHƯA có UI admin riêng
+  // cho việc này, ngoài phạm vi đợt build này.
+  handledAt DateTime? @map("handled_at")
+
+  @@index([type, createdAt])
+  @@map("marketing_leads")
 }

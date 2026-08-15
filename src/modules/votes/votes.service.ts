@@ -120,4 +120,27 @@ export class VotesService {
     const lastAppSessionAt = lastSession?.openedAt ?? new Date();
     return this.trustScore.calculateVoteWeight(displayScore, lastAppSessionAt);
   }
+
+  // Cho PostsService/CommentsService biết viewer đã vote mục nào rồi (mục 28) — vote 1 CHIỀU,
+  // không có un-vote, nên FE cần biết trạng thái này để khoá nút thay vì cho bấm lại rồi nhận lỗi
+  // "Bạn đã vote cho mục này rồi".
+  async getVotedTargetIds(
+    voterId: string,
+    targetType: 'post' | 'comment',
+    targetIds: string[],
+  ): Promise<Set<string>> {
+    if (targetIds.length === 0) return new Set();
+
+    const where =
+      targetType === 'post'
+        ? { voterId, postId: { in: targetIds } }
+        : { voterId, commentId: { in: targetIds } };
+    const votes = await this.prisma.vote.findMany({
+      where,
+      select: { postId: true, commentId: true },
+    });
+    return new Set(
+      votes.map((v) => v.postId ?? v.commentId).filter((id): id is string => id != null),
+    );
+  }
 }

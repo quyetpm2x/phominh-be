@@ -8,7 +8,9 @@ import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  // rawBody: true — cần cho verify chữ ký webhook (payout-webhook.controller.ts): JSON đã parse rồi
+  // stringify lại KHÔNG đảm bảo giữ đúng thứ tự byte gốc mà đối tác đã ký.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
   app.useLogger(app.get(Logger));
 
   const config = app.get(ConfigService);
@@ -23,6 +25,12 @@ async function bootstrap(): Promise<void> {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );
+
+  // Chỉ admin panel (apps/admin) gọi thẳng từ trình duyệt nên cần CORS — mobile app dùng
+  // native fetch (không qua CORS), web marketing gọi từ Server Action (server-to-server, cũng
+  // không qua CORS). Admin panel tự đính JWT vào header Authorization (không dựa vào cookie
+  // trình duyệt tự gửi), nên không cần credentials: true.
+  app.enableCors({ origin: config.get<string>('ADMIN_APP_URL', 'http://localhost:3001') });
 
   // /api/mobile/*, /api/admin/*, /api/public/* — namespace theo client, 1 backend duy nhất
   // (tai-lieu-cong-nghe-backend.md §10). Prefix đã nằm trong từng @Controller() path, không set

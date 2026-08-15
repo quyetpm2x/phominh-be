@@ -176,7 +176,8 @@ export class UsersService {
     return labels;
   }
 
-  private async getDisplayTrustScoresForUsers(userIds: string[]): Promise<Map<string, number>> {
+  // Public — cũng dùng bởi rewards/tier-lock-cron.service.ts để khoá bậc đầu tháng (bussiness §5.1b).
+  async getDisplayTrustScoresForUsers(userIds: string[]): Promise<Map<string, number>> {
     const uniqueIds = [...new Set(userIds)];
     if (uniqueIds.length === 0) return new Map();
 

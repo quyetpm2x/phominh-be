@@ -13,6 +13,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { ModerationService } from '../moderation/moderation.service';
 import { UsersService } from '../users/users.service';
+import { VotesService } from '../votes/votes.service';
 
 import type { CreatePostDto } from './dto/create-post.dto';
 import type { NearbyQueryDto } from './dto/nearby-query.dto';
@@ -37,6 +38,7 @@ export class PostsService {
     private readonly usersService: UsersService,
     private readonly merchantsService: MerchantsService,
     private readonly moderationService: ModerationService,
+    private readonly votesService: VotesService,
   ) {}
 
   async create(authorId: string, dto: CreatePostDto): Promise<Post> {
@@ -136,7 +138,7 @@ export class PostsService {
 
   // Chi tiết 1 bài (Tầng 2 task 11) — trả cùng shape enrich như findNearby (trừ distanceMeters/score,
   // vốn cần toạ độ người xem) để 1 PostDetail type dùng chung ở frontend.
-  async findOne(id: string) {
+  async findOne(id: string, viewerId: string) {
     const rows = await this.prisma.$queryRaw<PostRow[]>`
       select p.id, p.author_id, p.post_type, p.status, p.content, p.lat, p.lng, p.display_mode, p.is_library_photo,
         p.vote_count, p.comment_count, p.expires_at, p.created_at,
@@ -150,10 +152,14 @@ export class PostsService {
     const row = rows[0];
     if (!row) throw new NotFoundException('Không tìm thấy bài đăng');
 
-    const badges = await this.usersService.getBadgeLabelsForUsers([row.author_id]);
+    const [badges, votedIds] = await Promise.all([
+      this.usersService.getBadgeLabelsForUsers([row.author_id]),
+      this.votesService.getVotedTargetIds(viewerId, 'post', [row.id]),
+    ]);
     return {
       ...toBaseSummary(row),
       authorBadge: badges.get(row.author_id) ?? DEFAULT_BADGE_LABEL,
+      hasVoted: votedIds.has(row.id),
     };
   }
 
@@ -196,12 +202,20 @@ export class PostsService {
       limit ${NEARBY_RESULT_LIMIT}
     `;
 
-    const badges = await this.usersService.getBadgeLabelsForUsers(rows.map((r) => r.author_id));
+    const [badges, votedIds] = await Promise.all([
+      this.usersService.getBadgeLabelsForUsers(rows.map((r) => r.author_id)),
+      this.votesService.getVotedTargetIds(
+        viewerId,
+        'post',
+        rows.map((r) => r.id),
+      ),
+    ]);
 
     return rows
       .map((row) => ({
         ...toBaseSummary(row),
         authorBadge: badges.get(row.author_id) ?? DEFAULT_BADGE_LABEL,
+        hasVoted: votedIds.has(row.id),
         distanceMeters: Math.round(row.distance_m),
         score: this.ranking.calculateScore({
           postType: row.post_type,

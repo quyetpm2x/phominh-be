@@ -19,4 +19,11 @@ export class AnalyticsController {
   getDailySnapshot(@Query('date') date: string, @Query('areaId') areaId?: string) {
     return this.analyticsService.getDailySnapshot(new Date(date), areaId);
   }
+
+  // 4 số liệu cốt lõi cho Dashboard tổng quan (tai-lieu-chuc-nang.md #85).
+  @RequirePermission('view_analytics')
+  @Get('dashboard-summary')
+  getDashboardSummary() {
+    return this.analyticsService.getDashboardSummary();
+  }
 }

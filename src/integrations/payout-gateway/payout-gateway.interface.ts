@@ -12,4 +12,7 @@ export const PAYOUT_GATEWAY = Symbol('PAYOUT_GATEWAY');
 // bọc — thêm khi implement momo-payout.service.ts đầy đủ.
 export interface IPayoutGateway {
   transfer(amountVnd: number, bankAccountId: string): Promise<PayoutResult>;
+  // Xác thực chữ ký webhook callback trạng thái chi hộ — rawBody PHẢI là chuỗi gốc đối tác gửi lên,
+  // không phải JSON đã parse lại rồi stringify (thứ tự field khác đi là chữ ký sai).
+  verifyWebhookSignature(rawBody: string, signature: string): boolean;
 }

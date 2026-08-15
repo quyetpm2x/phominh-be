@@ -6,9 +6,9 @@ export class RequestPayoutDto {
   @IsUUID()
   bankAccountId!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'Bội số 50.000đ (bussiness §5.1e)' })
   @IsInt()
-  @Min(1000)
+  @Min(50_000)
   amount!: number; // VND
 
   @ApiProperty({ enum: ['leaderboard', 'referral'] })

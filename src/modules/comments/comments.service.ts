@@ -3,6 +3,7 @@ import type { Comment, CommentVisibility } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { VotesService } from '../votes/votes.service';
 
 import type { CreateCommentDto } from './dto/create-comment.dto';
 import type { UpdateCommentDto } from './dto/update-comment.dto';
@@ -19,6 +20,8 @@ export interface CommentSummary {
   content: string;
   visibility: CommentVisibility;
   isPinned: boolean;
+  voteCount: number;
+  hasVoted: boolean;
   createdAt: Date;
 }
 
@@ -27,6 +30,7 @@ export class CommentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly votesService: VotesService,
   ) {}
 
   async create(postId: string, authorId: string, dto: CreateCommentDto): Promise<Comment> {
@@ -105,8 +109,15 @@ export class CommentsService {
       },
       orderBy: [{ isPinned: 'desc' }, { createdAt: 'asc' }],
       // Comment KHÔNG có field displayMode như Post — luôn hiện theo bí danh, không có lựa chọn tên thật.
-      include: { author: { select: { alias: true } } },
+      // Comment không có cột voteCount cache như Post (schema.prisma) — đếm qua _count tại đây.
+      include: { author: { select: { alias: true } }, _count: { select: { votes: true } } },
     });
+
+    const votedIds = await this.votesService.getVotedTargetIds(
+      viewerId,
+      'comment',
+      comments.map((c) => c.id),
+    );
 
     return comments.map((c) => ({
       id: c.id,
@@ -116,6 +127,8 @@ export class CommentsService {
       content: c.content,
       visibility: c.visibility,
       isPinned: c.isPinned,
+      voteCount: c._count.votes,
+      hasVoted: votedIds.has(c.id),
       createdAt: c.createdAt,
     }));
   }

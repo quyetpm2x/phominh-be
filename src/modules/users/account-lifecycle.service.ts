@@ -1,10 +1,24 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import type { AccountStatus } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { TokenService } from '../auth/token.service';
 
 import { computeDaysRemaining } from './account-deletion.util';
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface AdminUserLookupResult {
+  id: string;
+  alias: string;
+  phoneNumber: string;
+  realName: string | null;
+  accountStatus: AccountStatus;
+  statusReason: string | null;
+  restrictedUntil: Date | null;
+  trustScoreE1: number;
+  createdAt: Date;
+}
 
 // Khớp đúng "CẬP NHẬT 01/2026" hiện đang hiện ở settings/terms.tsx (mobile) — đổi cả 2 nơi cùng lúc
 // khi điều khoản có bản mới, KHÔNG chỉ đổi 1 bên (lệch version thì API tưởng user đã đồng ý bản cũ).
@@ -54,6 +68,28 @@ export class AccountLifecycleService {
       status: user.accountStatus,
       reason: user.statusReason,
       restrictedUntil: user.restrictedUntil,
+    };
+  }
+
+  // Tra cứu trước khi khoá (tai-lieu-chuc-nang.md #95, mock UI gốc "Ô nhập SĐT hoặc mã tài khoản")
+  // — trước đây KHÔNG có cách nào để admin tìm ra userId cần khoá dù PATCH .../status đã chạy thật,
+  // nên mục 95 đứng yên vô dụng. Dùng chung quyền manage_user_lock, không tạo quyền view riêng vì
+  // tra cứu chỉ có ý nghĩa ngay trước hành động khoá/mở khoá.
+  async findByPhoneOrId(query: string): Promise<AdminUserLookupResult> {
+    const user = await this.prisma.user.findFirst({
+      where: UUID_PATTERN.test(query) ? { id: query } : { phoneNumber: query },
+    });
+    if (!user) throw new NotFoundException('Không tìm thấy tài khoản khớp SĐT/mã tài khoản này');
+    return {
+      id: user.id,
+      alias: user.alias,
+      phoneNumber: user.phoneNumber,
+      realName: user.realName,
+      accountStatus: user.accountStatus,
+      statusReason: user.statusReason,
+      restrictedUntil: user.restrictedUntil,
+      trustScoreE1: user.trustScoreE1,
+      createdAt: user.createdAt,
     };
   }
 

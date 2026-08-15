@@ -79,4 +79,57 @@ export class EmergencyService {
       verifiedAt: post.emergencyVerifiedAt,
     };
   }
+
+  // Danh sách cho admin (tai-lieu-chuc-nang.md #90) — mới nhất trước, kèm số lượt xác nhận thật để
+  // admin so với ngưỡng CONFIRMATION_THRESHOLD lúc quyết định can thiệp thủ công.
+  async listForAdmin() {
+    const posts = await this.prisma.post.findMany({
+      where: { postType: 'emergency' },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        author: { select: { alias: true } },
+        _count: { select: { emergencyConfirmations: true } },
+      },
+    });
+    return posts.map((post) => ({
+      id: post.id,
+      content: post.content,
+      authorAlias: post.author.alias,
+      createdAt: post.createdAt,
+      confirmCount: post._count.emergencyConfirmations,
+      threshold: CONFIRMATION_THRESHOLD,
+      verifiedAt: post.emergencyVerifiedAt,
+      resolvedAt: post.emergencyResolvedAt,
+    }));
+  }
+
+  private async findEmergencyPostOrThrow(postId: string) {
+    const post = await this.prisma.post.findUnique({ where: { id: postId } });
+    if (!post) throw new NotFoundException('Không tìm thấy bài đăng');
+    if (post.postType !== 'emergency') {
+      throw new BadRequestException('Chỉ áp dụng cho bài loại khẩn cấp');
+    }
+    return post;
+  }
+
+  // Admin can thiệp thủ công khi chưa đủ ngưỡng xác nhận tự nhiên nhưng đã xác minh được qua kênh
+  // khác (gọi điện, nguồn tin chính thống...) — bussiness §3, tai-lieu-chuc-nang.md #90.
+  async verifyManually(postId: string): Promise<void> {
+    const post = await this.findEmergencyPostOrThrow(postId);
+    if (post.emergencyVerifiedAt) return;
+    await this.prisma.post.update({
+      where: { id: postId },
+      data: { emergencyVerifiedAt: new Date() },
+    });
+  }
+
+  // "Đã giải quyết" (tai-lieu-chuc-nang.md #90) — KHÁC verifiedAt, đánh dấu tình huống thực tế đã
+  // qua (VD mất điện đã có lại), độc lập với việc bài có được xác minh là tin thật hay không.
+  async resolve(postId: string): Promise<void> {
+    await this.findEmergencyPostOrThrow(postId);
+    await this.prisma.post.update({
+      where: { id: postId },
+      data: { emergencyResolvedAt: new Date() },
+    });
+  }
 }

@@ -70,4 +70,21 @@ export class AdminService {
   async listPermissions() {
     return this.prisma.permission.findMany({ orderBy: [{ groupName: 'asc' }, { label: 'asc' }] });
   }
+
+  // Xem danh sách toàn bộ tài khoản admin hiện có (tai-lieu-chuc-nang.md #113) — trước đây KHÔNG
+  // có route nào, FE chỉ render mock tĩnh dù #111 (tạo admin) đã hoạt động thật từ trước.
+  async listAdmins() {
+    const admins = await this.prisma.adminUser.findMany({
+      orderBy: { createdAt: 'asc' },
+      include: { permissions: { include: { permission: true } } },
+    });
+    return admins.map((a) => ({
+      id: a.id,
+      email: a.email,
+      name: a.name,
+      isOwner: a.isOwner,
+      createdAt: a.createdAt,
+      permissionKeys: a.permissions.map((p) => p.permission.permissionKey),
+    }));
+  }
 }

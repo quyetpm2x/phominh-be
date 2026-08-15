@@ -1,8 +1,9 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { PayoutRequest, UserBankAccount } from '@prisma/client';
 
 import { encryptAccountNumber } from '../../common/utils/bank-account-crypto';
+import { retryWithBackoff } from '../../common/utils/retry.util';
 import {
   PAYMENT_GATEWAY,
   type IPaymentGateway,
@@ -12,16 +13,34 @@ import {
   type IPayoutGateway,
 } from '../../integrations/payout-gateway/payout-gateway.interface';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  isBankLinkCooldownPassed,
+  isValidPayoutAmount,
+  netPayoutAmount,
+  requiresManualAdminApproval,
+  taxWithheld,
+} from '../rewards/reward-payout.util';
+import { RewardWalletService } from '../rewards/reward-wallet.service';
 
 import type { CreateSubscriptionDto } from './dto/create-subscription.dto';
 import type { LinkBankAccountDto } from './dto/link-bank-account.dto';
 import type { RequestPayoutDto } from './dto/request-payout.dto';
 
+export interface PayoutRequestResult {
+  payoutRequest: PayoutRequest;
+  taxWithheld: number;
+  netAmount: number;
+  requiresManualApproval: boolean;
+}
+
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly rewardWallet: RewardWalletService,
     @Inject(PAYMENT_GATEWAY) private readonly paymentGateway: IPaymentGateway,
     @Inject(PAYOUT_GATEWAY) private readonly payoutGateway: IPayoutGateway,
   ) {}
@@ -65,18 +84,63 @@ export class PaymentsService {
     });
   }
 
-  // Tạo yêu cầu chi hộ — thuần DB, không gọi gateway ở bước này. App không giữ tiền ở giữa tại bất
-  // kỳ thời điểm nào (bussiness §11.2): PayoutRequest chỉ là ý định, tiền chỉ di chuyển thật khi
-  // admin duyệt qua processPayout().
-  async requestPayout(userId: string, dto: RequestPayoutDto): Promise<PayoutRequest> {
-    const bankAccount = await this.prisma.userBankAccount.findUnique({
-      where: { id: dto.bankAccountId },
+  async getMyBankAccounts(
+    userId: string,
+  ): Promise<Omit<UserBankAccount, 'accountNumberEncrypted'>[]> {
+    const accounts = await this.prisma.userBankAccount.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
     });
-    if (!bankAccount || bankAccount.userId !== userId) {
-      throw new BadRequestException('Tài khoản ngân hàng không hợp lệ');
+    // KHÔNG trả accountNumberEncrypted về client — chỉ dùng nội bộ lúc gọi gateway thật.
+    return accounts.map(({ accountNumberEncrypted: _omit, ...rest }) => rest);
+  }
+
+  // Tạo yêu cầu chi hộ + validate đầy đủ (bussiness §5.1e): eKYC đã xác thực, đủ 48-72h sau liên kết
+  // lần đầu, đúng bội số 50.000đ, không vượt số dư ví. Trừ ví NGAY (giữ chỗ số dư) — app không giữ
+  // tiền ở giữa tại bất kỳ thời điểm nào, tiền chỉ thật sự rời hệ thống khi admin duyệt qua
+  // processPayout(); nếu gateway báo lỗi ở bước đó, hoàn lại ví (xem processPayout).
+  async requestPayout(userId: string, dto: RequestPayoutDto): Promise<PayoutRequestResult> {
+    const bankAccount = await this.prisma.userBankAccount.findFirst({
+      where: { id: dto.bankAccountId, userId },
+    });
+    if (!bankAccount) throw new NotFoundException('Không tìm thấy tài khoản ngân hàng đã liên kết');
+    if (!bankAccount.verifiedAt) {
+      throw new BadRequestException('Tài khoản ngân hàng chưa xác thực eKYC');
     }
-    return this.prisma.payoutRequest.create({
+    if (!isBankLinkCooldownPassed(bankAccount.createdAt)) {
+      throw new BadRequestException(
+        'Cần chờ 48-72h sau khi liên kết ngân hàng lần đầu mới được rút',
+      );
+    }
+
+    const balance = await this.rewardWallet.getBalance(userId);
+    if (!isValidPayoutAmount(dto.amount, balance)) {
+      throw new BadRequestException(
+        'Số tiền rút không hợp lệ — phải là bội số 50.000đ, tối thiểu 50.000đ và không vượt số dư',
+      );
+    }
+
+    const successfulPayoutCount = await this.prisma.payoutRequest.count({
+      where: { userId, status: 'success' },
+    });
+
+    const payoutRequest = await this.prisma.payoutRequest.create({
       data: { userId, bankAccountId: dto.bankAccountId, amount: dto.amount, source: dto.source },
+    });
+    await this.rewardWallet.credit(userId, -dto.amount, 'payout', payoutRequest.id);
+
+    return {
+      payoutRequest,
+      taxWithheld: taxWithheld(dto.amount),
+      netAmount: netPayoutAmount(dto.amount),
+      requiresManualApproval: requiresManualAdminApproval(dto.amount, successfulPayoutCount === 0),
+    };
+  }
+
+  async getMyPayoutRequests(userId: string): Promise<PayoutRequest[]> {
+    return this.prisma.payoutRequest.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
     });
   }
 
@@ -93,19 +157,55 @@ export class PaymentsService {
     });
   }
 
-  // Admin duyệt — gọi thẳng MomoPayoutService stub nên sẽ ném NotImplementedException tới khi nối
-  // API thật. Tách riêng khỏi requestPayout() đúng nguyên tắc "app không giữ tiền ở giữa".
-  async processPayout(payoutRequestId: string) {
+  // Admin duyệt — gọi gateway thật (có retry backoff, tránh 1 lỗi mạng tạm thời làm hỏng cả luồng
+  // chi tiền). Nếu gateway lỗi hẳn sau khi hết số lần retry, HOÀN LẠI ví (đã trừ lúc requestPayout)
+  // và đánh dấu failed — không được để tiền "biến mất" khỏi ví mà không rõ lý do.
+  async processPayout(payoutRequestId: string): Promise<PayoutRequest> {
     const payout = await this.prisma.payoutRequest.findUnique({ where: { id: payoutRequestId } });
     if (!payout) throw new NotFoundException('Không tìm thấy yêu cầu chi hộ');
 
-    const result = await this.payoutGateway.transfer(payout.amount, payout.bankAccountId);
-    return this.prisma.payoutRequest.update({
-      where: { id: payoutRequestId },
-      data: {
-        status: result.status === 'success' ? 'success' : 'processing',
-        providerTransactionId: result.providerTransactionId,
-      },
-    });
+    try {
+      const result = await retryWithBackoff(() =>
+        this.payoutGateway.transfer(payout.amount, payout.bankAccountId),
+      );
+      return this.prisma.payoutRequest.update({
+        where: { id: payoutRequestId },
+        data: {
+          status: result.status === 'success' ? 'success' : 'processing',
+          providerTransactionId: result.providerTransactionId,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Chi hộ thất bại cho payoutRequestId=${payoutRequestId}: ${(error as Error).message}`,
+      );
+      await this.rewardWallet.credit(payout.userId, payout.amount, 'payout', payout.id);
+      return this.prisma.payoutRequest.update({
+        where: { id: payoutRequestId },
+        data: { status: 'failed' },
+      });
+    }
+  }
+
+  // Webhook callback trạng thái từ đối tác (chữ ký đã verify ở controller trước khi gọi vào đây) —
+  // đối tác báo "processing" chuyển "failed" sau (khác lỗi ngay lúc gọi transfer(), xử lý ở
+  // processPayout()) — vẫn cần hoàn ví vì tiền chưa thật sự rời hệ thống.
+  async handlePayoutWebhook(
+    providerTransactionId: string,
+    status: 'success' | 'failed',
+  ): Promise<void> {
+    const payout = await this.prisma.payoutRequest.findFirst({ where: { providerTransactionId } });
+    if (!payout) {
+      this.logger.warn(
+        `Webhook chi hộ: không tìm thấy providerTransactionId=${providerTransactionId}`,
+      );
+      return;
+    }
+    if (payout.status === status) return; // đã xử lý, tránh cộng/trừ ví trùng nếu webhook gửi lại
+
+    if (status === 'failed') {
+      await this.rewardWallet.credit(payout.userId, payout.amount, 'payout', payout.id);
+    }
+    await this.prisma.payoutRequest.update({ where: { id: payout.id }, data: { status } });
   }
 }

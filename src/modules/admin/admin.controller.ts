@@ -32,6 +32,15 @@ export class AdminController {
     return this.adminService.createAdmin(dto, admin.id);
   }
 
+  // Nhóm H (tai-lieu-chuc-nang.md #113).
+  @ApiBearerAuth()
+  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @RequirePermission('manage_admins')
+  @Get('admins')
+  listAdmins() {
+    return this.adminService.listAdmins();
+  }
+
   @ApiBearerAuth()
   @UseGuards(AdminJwtAuthGuard)
   @Get('permissions')

@@ -21,6 +21,7 @@ import { ModerationModule } from './modules/moderation/moderation.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { PostsModule } from './modules/posts/posts.module';
+import { PublicModule } from './modules/public/public.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { RewardsModule } from './modules/rewards/rewards.module';
 import { UsersModule } from './modules/users/users.module';
@@ -78,6 +79,7 @@ import { PrismaModule } from './prisma/prisma.module';
     AdminModule,
     PaymentsModule,
     RewardsModule,
+    PublicModule,
     NotificationsModule,
     AnalyticsModule,
   ],
@@ -97,6 +99,14 @@ export class AppModule {
     if (process.env.NODE_ENV === 'production' && process.env.SMS_OTP_MODE !== 'real') {
       throw new Error(
         `SMS_OTP_MODE phải là "real" khi NODE_ENV=production — đang là "${process.env.SMS_OTP_MODE}"`,
+      );
+    }
+    // Tương tự — nhưng rủi ro cao hơn SMS: nếu PAYOUT_GATEWAY_MODE=console lọt ra production,
+    // MomoPayoutService.transfer() báo "success" giả (chỉ log) trong khi tiền KHÔNG hề rời hệ thống,
+    // user tưởng đã nhận tiền nhưng thực tế mất trắng.
+    if (process.env.NODE_ENV === 'production' && process.env.PAYOUT_GATEWAY_MODE !== 'real') {
+      throw new Error(
+        `PAYOUT_GATEWAY_MODE phải là "real" khi NODE_ENV=production — đang là "${process.env.PAYOUT_GATEWAY_MODE}"`,
       );
     }
   }

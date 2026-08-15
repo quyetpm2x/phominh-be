@@ -27,6 +27,7 @@ export const PERMISSION_KEYS = [
   'manage_payment_disputes',
   'manage_payouts',
   'manage_admins',
+  'manage_marketing_leads',
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];

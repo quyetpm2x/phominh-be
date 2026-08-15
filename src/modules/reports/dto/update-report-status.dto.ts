@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsNumber, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsNumber, Max, Min } from 'class-validator';
 
 export class UpdateReportStatusDto {
   @ApiProperty({ enum: ['reviewed', 'actioned', 'dismissed'] })
@@ -22,4 +22,17 @@ export class UpdateReportStatusDto {
   @Min(0)
   @Max(1)
   severityScore?: number;
+
+  // "Gỡ bài" (tai-lieu-chuc-nang.md #86) — chỉ áp dụng cho report targetType='post', bỏ qua nếu
+  // report là comment. Độc lập với severity — cảnh cáo (actioned, không gỡ) khác gỡ bài (actioned + gỡ).
+  @ApiPropertyOptional({ description: 'Gỡ bài khỏi feed — chỉ áp dụng report bài đăng' })
+  @IsOptional()
+  @IsBoolean()
+  removePost?: boolean;
+
+  // "Ẩn bình luận" (tai-lieu-chuc-nang.md #87/#88) — chỉ áp dụng report targetType='comment'.
+  @ApiPropertyOptional({ description: 'Ẩn bình luận — chỉ áp dụng report bình luận' })
+  @IsOptional()
+  @IsBoolean()
+  hideComment?: boolean;
 }

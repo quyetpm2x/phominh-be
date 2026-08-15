@@ -3,9 +3,51 @@ import type { DailyMetricsSnapshot } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 
+import { daysAgoUtc, startOfUtcDay } from './dashboard-date.util';
+
+const ACTIVE_MERCHANT_WINDOW_DAYS = 7;
+
+export interface DashboardSummary {
+  newUsersToday: number;
+  newPostsToday: number;
+  pendingReports: number;
+  activeMerchants: number;
+}
+
 @Injectable()
 export class AnalyticsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  // 4 số liệu cốt lõi (tai-lieu-chuc-nang.md #85) — đếm trực tiếp, KHÔNG qua DailyMetricsSnapshot
+  // (bảng đó dành cho G1-G8 chi tiết hơn, cần cron riêng chưa xây — xem computeNorthStarMetric()).
+  async getDashboardSummary(): Promise<DashboardSummary> {
+    const todayStart = startOfUtcDay();
+    const activeMerchantWindowStart = daysAgoUtc(ACTIVE_MERCHANT_WINDOW_DAYS);
+
+    const [newUsersToday, newPostsToday, pendingReports, activeMerchantPosts] = await Promise.all([
+      this.prisma.user.count({ where: { createdAt: { gte: todayStart } } }),
+      this.prisma.post.count({
+        where: { createdAt: { gte: todayStart }, status: { not: 'removed' } },
+      }),
+      this.prisma.report.count({ where: { status: 'pending' } }),
+      this.prisma.post.findMany({
+        where: {
+          postType: 'merchant',
+          status: { not: 'removed' },
+          createdAt: { gte: activeMerchantWindowStart },
+        },
+        distinct: ['authorId'],
+        select: { authorId: true },
+      }),
+    ]);
+
+    return {
+      newUsersToday,
+      newPostsToday,
+      pendingReports,
+      activeMerchants: activeMerchantPosts.length,
+    };
+  }
 
   // Đọc snapshot đã tính sẵn — việc TÍNH (cron hàng ngày, bussiness §9.7 G1-G8) chưa implement, xem
   // computeNorthStarMetric(). daily_metrics_snapshots chỉ có dữ liệu sau khi job cron đó chạy lần đầu.

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import type { Report, ReportStatus } from '@prisma/client';
+import type { Report } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -37,12 +37,10 @@ export class ReportsService {
     });
   }
 
-  async findQueue(status?: ReportStatus): Promise<Report[]> {
-    return this.prisma.report.findMany({ where: { status }, orderBy: { createdAt: 'asc' } });
-  }
-
   // Tầng 2 — chỉ khi ADMIN xác nhận (status='actioned') mới ghi E2 vào trust_score_history, đúng
-  // nguyên tắc "report không tự động trừ điểm" (bussiness §4.2b).
+  // nguyên tắc "report không tự động trừ điểm" (bussiness §4.2b). removePost/hideComment
+  // (tai-lieu-chuc-nang.md #86-88) độc lập với severity — "cảnh cáo" (actioned, không gỡ) khác
+  // "gỡ bài/ẩn bình luận" (actioned + gỡ), admin tự chọn tuỳ mức độ.
   async updateStatus(
     reportId: string,
     adminId: string,
@@ -62,6 +60,16 @@ export class ReportsService {
       data: { status: dto.status, reviewedByAdminId: adminId },
     });
 
+    if (dto.removePost && report.postId) {
+      await this.prisma.post.update({ where: { id: report.postId }, data: { status: 'removed' } });
+    }
+    if (dto.hideComment && report.commentId) {
+      await this.prisma.comment.update({
+        where: { id: report.commentId },
+        data: { isHidden: true },
+      });
+    }
+
     // Kết quả xử lý report (tai-lieu-chuc-nang.md #49) — LUÔN gửi, không có cờ tắt riêng (đúng
     // thiết kế UI gốc — settings/notifications.tsx không có toggle cho mục này).
     if (report.reporterId) {
@@ -75,6 +83,37 @@ export class ReportsService {
     }
 
     return updated;
+  }
+
+  // Bắt buộc ghi lý do TRƯỚC khi xem nội dung bình luận riêng tư bị report (bussiness §9.9,
+  // tai-lieu-chuc-nang.md #88) — ReportQueriesService.findPrivateCommentReports() cố tình KHÔNG
+  // trả content, chỉ hàm này (đã ghi log) mới trả.
+  async revealPrivateComment(
+    reportId: string,
+    adminId: string,
+    reason: string,
+  ): Promise<{ content: string }> {
+    const report = await this.prisma.report.findUnique({
+      where: { id: reportId },
+      include: { comment: true },
+    });
+    if (!report?.commentId || !report.comment) {
+      throw new NotFoundException('Không tìm thấy report bình luận');
+    }
+    if (report.comment.visibility !== 'private') {
+      throw new BadRequestException('Report này không phải bình luận riêng tư');
+    }
+
+    await this.prisma.sensitiveDataAccessLog.create({
+      data: {
+        adminUserId: adminId,
+        dataType: 'private_comment',
+        targetId: report.commentId,
+        reason,
+      },
+    });
+
+    return { content: report.comment.content };
   }
 
   private async applyPenalty(
@@ -95,6 +134,7 @@ export class ReportsService {
           userId: violatorId,
           delta: -penalty,
           sourceType: 'violation_confirmed',
+          severity,
           referenceId: report.id,
           confirmedByAdminId: report.reviewedByAdminId,
         },
