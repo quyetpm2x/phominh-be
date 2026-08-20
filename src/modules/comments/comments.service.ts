@@ -223,11 +223,17 @@ export class CommentsService {
     if (post.authorId !== ownerId) {
       throw new ForbiddenException('Chỉ chủ bài mới được ẩn/xoá bình luận trên bài của mình');
     }
+    const before = await this.prisma.comment.findUnique({ where: { id: commentId } });
     const updated = await this.prisma.comment.update({
       where: { id: commentId },
       data: { isHidden },
     });
-    if (isHidden) await this.cascadeHideReplies(commentId);
+    // Chỉ trừ commentCount khi CHUYỂN từ hiện sang ẩn (before?.isHidden === false) — tránh trừ 2
+    // lần nếu API bị gọi lặp lại trên 1 bình luận đã ẩn từ trước (idempotent).
+    if (isHidden && before && !before.isHidden) {
+      const hiddenReplies = await this.cascadeHideReplies(commentId);
+      await this.decrementCommentCount(postId, 1 + hiddenReplies);
+    }
     return updated;
   }
 
@@ -242,7 +248,10 @@ export class CommentsService {
       where: { id: commentId },
       data: { isHidden: true },
     });
-    await this.cascadeHideReplies(commentId);
+    if (!comment.isHidden) {
+      const hiddenReplies = await this.cascadeHideReplies(commentId);
+      await this.decrementCommentCount(comment.postId, 1 + hiddenReplies);
+    }
     await this.prisma.adminActionLog.create({
       data: {
         adminUserId: adminId,
@@ -256,11 +265,24 @@ export class CommentsService {
   }
 
   // Ẩn 1 bình luận GỐC tự động ẩn theo mọi reply trực tiếp — không cần đệ quy sâu hơn vì reply chỉ
-  // lồng 1 cấp (xem resolveParentCommentId).
-  private async cascadeHideReplies(commentId: string): Promise<void> {
-    await this.prisma.comment.updateMany({
-      where: { parentCommentId: commentId },
+  // lồng 1 cấp (xem resolveParentCommentId). where lọc isHidden:false để updateMany chỉ đếm/ẩn
+  // đúng những reply CHƯA từng ẩn trước đó (tránh trừ commentCount trùng nếu 1 reply đã bị ẩn riêng
+  // rồi mới tới lượt bình luận cha bị ẩn).
+  private async cascadeHideReplies(commentId: string): Promise<number> {
+    const { count } = await this.prisma.comment.updateMany({
+      where: { parentCommentId: commentId, isHidden: false },
       data: { isHidden: true },
+    });
+    return count;
+  }
+
+  // commentCount là cache hiển thị cho user (Bình luận · N) — phải phản ánh đúng số bình luận
+  // CÒN XEM ĐƯỢC, không phải tổng số từng tạo (Post.commentCount không tự trừ khi ẩn/xoá trước khi
+  // sửa lỗi này — 2026-08-21).
+  private async decrementCommentCount(postId: string, amount: number): Promise<void> {
+    await this.prisma.post.update({
+      where: { id: postId },
+      data: { commentCount: { decrement: amount } },
     });
   }
 
@@ -276,10 +298,13 @@ export class CommentsService {
 
   // Xoá bình luận của chính mình — dùng chung field isHidden với setHiddenByOwner (xem comment trên
   // Comment.isHidden trong schema.prisma vì sao 2 hành động khác actor lại chung 1 field).
+  // findOwnComment() bên dưới đã đảm bảo comment chưa từng bị ẩn (ném lỗi nếu isHidden=true) nên
+  // luôn an toàn để trừ commentCount không cần kiểm tra lại.
   async deleteOwn(commentId: string, authorId: string): Promise<void> {
     const comment = await this.findOwnComment(commentId, authorId);
     await this.prisma.comment.update({ where: { id: comment.id }, data: { isHidden: true } });
-    await this.cascadeHideReplies(comment.id);
+    const hiddenReplies = await this.cascadeHideReplies(comment.id);
+    await this.decrementCommentCount(comment.postId, 1 + hiddenReplies);
   }
 
   private async findOwnComment(commentId: string, authorId: string): Promise<Comment> {
