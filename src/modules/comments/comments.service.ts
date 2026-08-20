@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { VotesService } from '../votes/votes.service';
 
+import { buildCommentTree } from './comment-tree.util';
 import type { CreateCommentDto } from './dto/create-comment.dto';
 import type { UpdateCommentDto } from './dto/update-comment.dto';
 
@@ -22,7 +23,9 @@ export interface CommentSummary {
   isPinned: boolean;
   voteCount: number;
   hasVoted: boolean;
+  parentCommentId: string | null;
   createdAt: Date;
+  replies: CommentSummary[];
 }
 
 @Injectable()
@@ -41,6 +44,8 @@ export class CommentsService {
       await this.assertAccountOldEnough(authorId);
     }
 
+    const parentCommentId = await this.resolveParentCommentId(postId, dto.parentCommentId);
+
     // TODO(moderation): phát hiện cụm tấn công (5 bình luận tiêu cực/10 phút → tạm khoá 1-2h, tạo
     // CommentAttackIncident) chưa implement — cần phân loại "tiêu cực" (Vision/NLP hoặc report dồn
     // dập), để ở modules/moderation.
@@ -55,6 +60,7 @@ export class CommentsService {
         content: dto.content,
         visibility: dto.visibility ?? 'public',
         isHidden: false,
+        parentCommentId,
       },
     });
     await this.prisma.post.update({
@@ -64,7 +70,32 @@ export class CommentsService {
     if (post.authorId !== authorId) {
       await this.notifyPostOwner(postId, post.authorId, authorId, comment.content);
     }
+    if (parentCommentId) {
+      await this.notifyParentCommentAuthor(
+        parentCommentId,
+        postId,
+        post.authorId,
+        authorId,
+        comment.content,
+      );
+    }
     return comment;
+  }
+
+  // Reply lồng nhau CHỈ 1 cấp (quyết định 2026-08-20) — trả lời 1 reply tự "phẳng hoá" về đúng bình
+  // luận GỐC (ông/bà thay vì cha), tránh chuỗi lồng sâu vô hạn ở UI mobile. Mobile app cũng không
+  // hiện nút "Trả lời" trên reply (chỉ trên bình luận gốc) nên nhánh flatten này chủ yếu là lưới an
+  // toàn phòng race-condition/nhiều client.
+  private async resolveParentCommentId(
+    postId: string,
+    parentCommentId?: string,
+  ): Promise<string | null> {
+    if (!parentCommentId) return null;
+    const parent = await this.prisma.comment.findUnique({ where: { id: parentCommentId } });
+    if (!parent || parent.postId !== postId) {
+      throw new NotFoundException('Không tìm thấy bình luận đang trả lời');
+    }
+    return parent.parentCommentId ?? parent.id;
   }
 
   // Thông báo bình luận mới (tai-lieu-chuc-nang.md #47/#48) — tôn trọng cờ notifyComments (mặc
@@ -87,6 +118,34 @@ export class CommentsService {
       postAuthorId,
       'comment_on_post',
       `${commenter.alias} vừa bình luận trên bài của bạn`,
+      preview,
+      postId,
+    );
+  }
+
+  // Thông báo riêng cho tác giả bình luận GỐC khi có reply — bỏ qua nếu tự trả lời chính mình hoặc
+  // nếu tác giả đó chính là chủ bài (đã nhận notifyPostOwner ở trên rồi, tránh báo trùng 2 lần).
+  private async notifyParentCommentAuthor(
+    parentCommentId: string,
+    postId: string,
+    postAuthorId: string,
+    replierId: string,
+    content: string,
+  ): Promise<void> {
+    const parent = await this.prisma.comment.findUnique({ where: { id: parentCommentId } });
+    if (!parent || parent.authorId === replierId || parent.authorId === postAuthorId) return;
+
+    const setting = await this.prisma.notificationDigestSetting.findUnique({
+      where: { userId: parent.authorId },
+    });
+    if (setting && !setting.notifyComments) return;
+
+    const replier = await this.prisma.user.findUniqueOrThrow({ where: { id: replierId } });
+    const preview = content.length > 80 ? `${content.slice(0, 80)}…` : content;
+    await this.notifications.createNotification(
+      parent.authorId,
+      'reply_on_comment',
+      `${replier.alias} đã trả lời bình luận của bạn`,
       preview,
       postId,
     );
@@ -119,7 +178,7 @@ export class CommentsService {
       comments.map((c) => c.id),
     );
 
-    return comments.map((c) => ({
+    const flat: CommentSummary[] = comments.map((c) => ({
       id: c.id,
       postId: c.postId,
       authorId: c.authorId,
@@ -129,8 +188,12 @@ export class CommentsService {
       isPinned: c.isPinned,
       voteCount: c._count.votes,
       hasVoted: votedIds.has(c.id),
+      parentCommentId: c.parentCommentId,
       createdAt: c.createdAt,
+      replies: [],
     }));
+
+    return buildCommentTree(flat);
   }
 
   async setPinned(
@@ -160,7 +223,45 @@ export class CommentsService {
     if (post.authorId !== ownerId) {
       throw new ForbiddenException('Chỉ chủ bài mới được ẩn/xoá bình luận trên bài của mình');
     }
-    return this.prisma.comment.update({ where: { id: commentId }, data: { isHidden } });
+    const updated = await this.prisma.comment.update({
+      where: { id: commentId },
+      data: { isHidden },
+    });
+    if (isHidden) await this.cascadeHideReplies(commentId);
+    return updated;
+  }
+
+  // Admin ẩn bình luận bất kỳ trên toàn hệ thống — ngoài phạm vi 117 mục gốc, mở rộng cùng mục 120
+  // (quản lý bài đăng). Khác setHiddenByOwner (chỉ chủ bài trên bài của chính mình). Bắt buộc ghi
+  // lý do (HideCommentDto), ghi vào AdminActionLog.
+  async adminHide(commentId: string, adminId: string, reason: string): Promise<Comment> {
+    const comment = await this.prisma.comment.findUnique({ where: { id: commentId } });
+    if (!comment) throw new NotFoundException('Không tìm thấy bình luận');
+
+    const updated = await this.prisma.comment.update({
+      where: { id: commentId },
+      data: { isHidden: true },
+    });
+    await this.cascadeHideReplies(commentId);
+    await this.prisma.adminActionLog.create({
+      data: {
+        adminUserId: adminId,
+        action: 'hide_comment',
+        targetType: 'comment',
+        targetId: commentId,
+        metadata: { reason },
+      },
+    });
+    return updated;
+  }
+
+  // Ẩn 1 bình luận GỐC tự động ẩn theo mọi reply trực tiếp — không cần đệ quy sâu hơn vì reply chỉ
+  // lồng 1 cấp (xem resolveParentCommentId).
+  private async cascadeHideReplies(commentId: string): Promise<void> {
+    await this.prisma.comment.updateMany({
+      where: { parentCommentId: commentId },
+      data: { isHidden: true },
+    });
   }
 
   // Sửa bình luận của chính mình (tai-lieu-chuc-nang.md #34) — không giới hạn chỉ tác giả mới sửa
@@ -178,6 +279,7 @@ export class CommentsService {
   async deleteOwn(commentId: string, authorId: string): Promise<void> {
     const comment = await this.findOwnComment(commentId, authorId);
     await this.prisma.comment.update({ where: { id: comment.id }, data: { isHidden: true } });
+    await this.cascadeHideReplies(comment.id);
   }
 
   private async findOwnComment(commentId: string, authorId: string): Promise<Comment> {

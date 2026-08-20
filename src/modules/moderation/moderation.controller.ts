@@ -1,4 +1,4 @@
-import { Controller, Post, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -20,5 +20,13 @@ export class ModerationController {
   @RequirePermission('view_collusion_flags')
   scanCollusion() {
     return this.moderationService.detectVoteCollusion();
+  }
+
+  // Tín hiệu gian lận tổng hợp (tai-lieu-chuc-nang.md #94) — xem giải thích phạm vi thật trong
+  // ModerationService.getFraudSignals().
+  @Get('fraud-signals')
+  @RequirePermission('view_fraud_signals')
+  getFraudSignals() {
+    return this.moderationService.getFraudSignals();
   }
 }

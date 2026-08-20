@@ -1,0 +1,1 @@
+ALTER TABLE "posts" ADD COLUMN "is_seeded" BOOLEAN NOT NULL DEFAULT false;

@@ -29,7 +29,10 @@ export default [
       'max-lines-per-function': ['warn', { max: 60, skipBlankLines: true, skipComments: true }],
       'max-statements': ['error', 21],
       complexity: ['warn', 12],
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
       'no-console': ['warn', { allow: ['warn', 'error'] }],
       '@typescript-eslint/no-explicit-any': 'warn',
       // Rule quan trọng nhất theo tai-lieu-cong-nghe-backend.md/FE §7 — bắt lỗi quên `await` khi

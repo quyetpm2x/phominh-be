@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -48,5 +59,16 @@ export class MerchantsController {
   @Post('me/menu-photos')
   addMenuPhoto(@CurrentUser() user: AuthenticatedUser, @Body() dto: AddMenuPhotoDto) {
     return this.merchantsService.addMenuPhoto(user.id, dto.url, dto.caption);
+  }
+
+  @Get('me/menu-photos')
+  listMenuPhotos(@CurrentUser() user: AuthenticatedUser) {
+    return this.merchantsService.listMenuPhotos(user.id);
+  }
+
+  @Delete('me/menu-photos/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteMenuPhoto(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.merchantsService.deleteMenuPhoto(user.id, id);
   }
 }

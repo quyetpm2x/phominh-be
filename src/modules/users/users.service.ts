@@ -44,6 +44,8 @@ export class UsersService {
       alias: user.alias,
       realName: user.realName,
       avatarUrl: user.avatarUrl,
+      dateOfBirth: user.dateOfBirth,
+      gender: user.gender,
       trustTier: tier,
       trustBadgeLabel: this.trustScore.getBadgeLabel(tier),
       pointsToNextTier: weightTierCapped ? this.pointsToNextTier(displayScore, tier) : null,
@@ -52,7 +54,14 @@ export class UsersService {
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto): Promise<User> {
-    return this.prisma.user.update({ where: { id: userId }, data: { realName: dto.realName } });
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        realName: dto.realName,
+        dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+        gender: dto.gender,
+      },
+    });
   }
 
   // Hồ sơ công khai người khác (tai-lieu-chuc-nang.md #36) — KHÔNG trả realName, xem comment ở
@@ -61,9 +70,10 @@ export class UsersService {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('Không tìm thấy người dùng');
 
-    const [displayScore, postCount] = await Promise.all([
+    const [displayScore, postCount, merchant] = await Promise.all([
       this.getDisplayTrustScore(userId),
       this.prisma.post.count({ where: { authorId: userId, status: 'active' } }),
+      this.prisma.merchantProfile.findUnique({ where: { userId }, select: { id: true } }),
     ]);
     const tier = this.trustScore.getBadgeTier(displayScore);
 
@@ -74,6 +84,7 @@ export class UsersService {
       trustBadgeLabel: this.trustScore.getBadgeLabel(tier),
       postCount,
       createdAt: user.createdAt,
+      merchantId: merchant?.id ?? null,
     };
   }
 

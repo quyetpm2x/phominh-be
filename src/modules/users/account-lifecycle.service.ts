@@ -3,6 +3,7 @@ import type { AccountStatus } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { TokenService } from '../auth/token.service';
+import { LegalDocumentsService } from '../legal-documents/legal-documents.service';
 
 import { computeDaysRemaining } from './account-deletion.util';
 
@@ -20,9 +21,14 @@ export interface AdminUserLookupResult {
   createdAt: Date;
 }
 
-// Khớp đúng "CẬP NHẬT 01/2026" hiện đang hiện ở settings/terms.tsx (mobile) — đổi cả 2 nơi cùng lúc
-// khi điều khoản có bản mới, KHÔNG chỉ đổi 1 bên (lệch version thì API tưởng user đã đồng ý bản cũ).
-export const CURRENT_TERMS_VERSION = '2026-01';
+export interface AdminDeletionRequestItem {
+  id: string;
+  userId: string;
+  alias: string;
+  phoneNumber: string;
+  requestedAt: Date;
+  daysRemaining: number;
+}
 
 // Tách khỏi UsersService (đã gần giới hạn 250 dòng) — gồm 3 mảng liên quan tài khoản không phải hồ
 // sơ hiển thị: điều khoản (#67), khoá/hạn chế (#74), yêu cầu xoá tài khoản mềm 30 ngày (#69/#73).
@@ -31,18 +37,21 @@ export class AccountLifecycleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokenService: TokenService,
+    private readonly legalDocuments: LegalDocumentsService,
   ) {}
 
+  // Phiên bản hiện hành đọc THẬT từ bảng legal_documents (tai-lieu-chuc-nang.md #103) — trước đây
+  // là hằng số cứng CURRENT_TERMS_VERSION, admin sửa qua API mới có tác dụng thật ở đây.
   async acceptTerms(userId: string): Promise<{ version: string; acceptedAt: Date }> {
-    return this.prisma.termsAcceptance.create({
-      data: { userId, version: CURRENT_TERMS_VERSION },
-    });
+    const version = await this.legalDocuments.getCurrentVersion('terms');
+    if (!version) throw new NotFoundException('Chưa có phiên bản điều khoản nào được publish');
+    return this.prisma.termsAcceptance.create({ data: { userId, version } });
   }
 
   async getTermsStatus(userId: string): Promise<{ hasAcceptedLatest: boolean }> {
-    const latest = await this.prisma.termsAcceptance.findFirst({
-      where: { userId, version: CURRENT_TERMS_VERSION },
-    });
+    const version = await this.legalDocuments.getCurrentVersion('terms');
+    if (!version) return { hasAcceptedLatest: false };
+    const latest = await this.prisma.termsAcceptance.findFirst({ where: { userId, version } });
     return { hasAcceptedLatest: !!latest };
   }
 
@@ -135,6 +144,40 @@ export class AccountLifecycleService {
       pending: true,
       daysRemaining: computeDaysRemaining(user.deletionRequestedAt, new Date()),
     };
+  }
+
+  // Hàng đợi cho admin xử lý thủ công (tai-lieu-chuc-nang.md #104, NĐ 13/2023) — luồng tự động
+  // (cron hard-delete sau 30 ngày) đã có sẵn, đây là bổ sung để admin CHỦ ĐỘNG xem/đẩy nhanh khi có
+  // yêu cầu qua kênh khác (email/hỗ trợ) cần xử lý gấp, không đợi đủ 30 ngày.
+  async listPendingDeletions(): Promise<AdminDeletionRequestItem[]> {
+    const requests = await this.prisma.dataDeletionRequest.findMany({
+      where: { status: 'requested' },
+      orderBy: { requestedAt: 'asc' },
+      include: { user: { select: { alias: true, phoneNumber: true } } },
+    });
+    return requests.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      alias: r.user.alias,
+      phoneNumber: r.user.phoneNumber,
+      requestedAt: r.requestedAt,
+      daysRemaining: computeDaysRemaining(r.requestedAt, new Date()),
+    }));
+  }
+
+  // Đẩy nhanh xoá ngay (bỏ qua thời gian ân hạn còn lại) — dùng chung logic hard-delete với
+  // AccountDeletionCronService.hardDeleteExpiredAccounts() (Cascade tự dọn hết dữ liệu liên quan).
+  async expediteDeletion(userId: string): Promise<void> {
+    const request = await this.prisma.dataDeletionRequest.findFirst({
+      where: { userId, status: 'requested' },
+    });
+    if (!request) throw new NotFoundException('Không có yêu cầu xoá tài khoản đang chờ xử lý');
+
+    await this.prisma.dataDeletionRequest.update({
+      where: { id: request.id },
+      data: { status: 'completed', completedAt: new Date() },
+    });
+    await this.prisma.user.delete({ where: { id: userId } });
   }
 
   // Đăng nhập lại trong lúc đang chờ xoá => khôi phục (tai-lieu-chuc-nang.md #69/#73) — gọi từ

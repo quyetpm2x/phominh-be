@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, scryptSync } from 'node:crypto';
 
 // Mã hoá số tài khoản ngân hàng trước khi lưu (user_bank_accounts.account_number_encrypted, dữ liệu
 // nhạy cảm — tài liệu bussiness §11.3). AES-256-GCM, khoá dẫn xuất từ BANK_ACCOUNT_ENCRYPTION_KEY.
@@ -17,6 +17,17 @@ export function encryptAccountNumber(plain: string, secret: string): string {
   const encrypted = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   return [iv, authTag, encrypted].map((b) => b.toString('base64')).join('.');
+}
+
+// Hash CÓ THỂ SO SÁNH (khác encryptAccountNumber — IV ngẫu nhiên nên không so được) để dò trùng số
+// tài khoản giữa các user (rào cản chống gian lận CHÍNH theo tài liệu bussiness §11: "1 số tài khoản
+// ngân hàng chỉ được gắn với đúng 1 tài khoản Phố Mình") — trước đây hoàn toàn không có cách nào dò
+// trùng vì AES-GCM mã hoá ra ciphertext khác nhau mỗi lần dù cùng 1 số tài khoản. HMAC dùng CHUNG khoá
+// với encryptAccountNumber — chấp nhận được ở quy mô thí điểm nhỏ (đủ dùng, xem TODO(production) đầu
+// file về chuyển sang KMS sau này, lúc đó nên tách khoá riêng cho hash).
+export function hashAccountNumber(bankCode: string, accountNumber: string, secret: string): string {
+  const normalized = `${bankCode.trim().toUpperCase()}:${accountNumber.replace(/\s+/g, '')}`;
+  return createHmac('sha256', secret).update(normalized).digest('hex');
 }
 
 export function decryptAccountNumber(payload: string, secret: string): string {

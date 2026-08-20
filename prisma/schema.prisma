@@ -29,8 +29,15 @@ model User {
   id                  String        @id @default(uuid()) @db.Uuid
   phoneNumber         String        @unique @map("phone_number")
   alias               String        @unique // bí danh tự sinh, cố định vĩnh viễn (bussiness §4.3)
-  realName            String?       @map("real_name") // tuỳ chọn, user tự đặt — dùng khi chọn hiển thị "tên thật" cho 1 bài
+  // Bắt buộc điền lúc onboarding (bổ sung ngoài 117 mục gốc, quyết định 2026-08-20) — cột vẫn
+  // nullable vì user CŨ (tạo trước khi có yêu cầu này) chưa có dữ liệu, tính "đã điền đủ hồ sơ" ở
+  // FE bằng cách kiểm tra cả 4 trường (realName/avatarUrl/dateOfBirth/gender) đều khác null, không
+  // lưu cờ onboardingCompleted riêng để tránh lệch dữ liệu (cùng triết lý "tính runtime" như
+  // accountStatus='restricted' tự hết hiệu lực ở trên).
+  realName            String?       @map("real_name")
   avatarUrl           String?       @map("avatar_url") // ảnh đại diện (tai-lieu-chuc-nang.md #37) — URL Supabase Storage, bucket "avatars"
+  dateOfBirth         DateTime?     @map("date_of_birth") @db.Date
+  gender              Gender?
   trustScoreE1        Float         @default(0) @map("trust_score_e1") // Lớp 1, chỉ tăng — điểm hiển thị = E1 trừ E2_hiệu_lực tính runtime
   // Trạng thái tài khoản (tai-lieu-chuc-nang.md #74) — thay cho isBanned boolean cũ (chỉ 1 mức,
   // không có lý do). "restricted" tự hết hiệu lực khi qua restrictedUntil, tính runtime lúc đọc,
@@ -50,9 +57,16 @@ model User {
   // ngày theo quyết định mới nhất). Set lúc bấm "xóa tài khoản", null lại nếu đăng nhập lại trong
   // 30 ngày (khôi phục). AccountDeletionCronService hard-delete khi quá hạn.
   deletionRequestedAt DateTime?     @map("deletion_requested_at")
+  // Cộng tác viên nội bộ (đăng bài mồi/tương tác thủ công, ngoài phạm vi tài liệu chức năng gốc,
+  // xem CollaboratorsService) — tài khoản THẬT, tự đăng ký/đăng nhập bằng SĐT thật như user thường,
+  // admin chỉ ĐÁNH DẤU sau khi họ đã có tài khoản (không đụng luồng OTP/auth). Cờ THUẦN NỘI BỘ,
+  // không hiện với ai — chỉ dùng để: (1) loại khỏi điều kiện rút thưởng thật, (2) loại khỏi bảng xếp
+  // hạng thưởng, (3) loại khỏi số liệu tăng trưởng thật (G1, user mới trong ngày).
+  isCollaborator      Boolean       @default(false) @map("is_collaborator")
   createdAt           DateTime      @default(now()) @map("created_at")
   updatedAt           DateTime      @updatedAt @map("updated_at")
 
+  collaboratorKpiTarget  CollaboratorKpiTarget?
   appSessions            AppSession[]
   refreshTokens          RefreshToken[]
   fixedAreas             FixedArea[]
@@ -88,6 +102,12 @@ enum AccountStatus {
   restricted
 }
 
+enum Gender {
+  male
+  female
+  other
+}
+
 // Xác nhận đồng ý Điều khoản, có lưu vết (tai-lieu-chuc-nang.md #67, bắt buộc theo NĐ 13/2023) —
 // lưu MỖI lần đồng ý (không ghi đè), giữ lịch sử đầy đủ nếu điều khoản đổi version sau này và cần
 // user đồng ý lại.
@@ -119,9 +139,16 @@ model IgnoredUser {
 }
 
 model AppSession {
-  id       String   @id @default(uuid()) @db.Uuid
-  userId   String   @map("user_id") @db.Uuid
-  openedAt DateTime @default(now()) @map("opened_at") // nguồn duy nhất cho hệ số hoạt động (bussiness §4.2c) và G1
+  id       String    @id @default(uuid()) @db.Uuid
+  userId   String    @map("user_id") @db.Uuid
+  openedAt DateTime  @default(now()) @map("opened_at") // nguồn duy nhất cho hệ số hoạt động (bussiness §4.2c) và G1
+  // Lúc app chuyển nền/đóng (AppState 'background'|'inactive', xem src/lib/appSessionTracker.ts
+  // phía mobile) — null nếu app bị crash/force-kill trước khi kịp gửi (chấp nhận thiếu sót nhỏ,
+  // KHÔNG dùng heartbeat liên tục để đỡ tốn pin). Nguồn cho "thời gian dùng thật" (bổ sung ngoài
+  // 117 mục gốc, xem CollaboratorsService/UserActivityService) — trước đây KHÔNG có cột này, cũng
+  // KHÔNG có bất kỳ route nào GHI vào bảng này (chỉ đọc) — mọi nơi dựa vào AppSession trước đây
+  // (activityFactor, G1, qualifyIfActive) thực chất luôn nhận dữ liệu rỗng, đã vá cùng lúc.
+  closedAt DateTime? @map("closed_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -236,6 +263,10 @@ model Post {
   // emergencyVerifiedAt (xác nhận đây là tin THẬT). 1 bài có thể verified nhưng chưa resolved
   // (đang xử lý), hoặc admin resolve thủ công dù chưa đủ ngưỡng verified (tai-lieu-chuc-nang.md #90).
   emergencyResolvedAt DateTime?                              @map("emergency_resolved_at")
+  // Bài mồi admin tự đăng cho khu mới thí điểm chưa đủ user (tai-lieu-chuc-nang.md #100) — cờ NỘI
+  // BỘ để tách khỏi số liệu bài đăng thật, KHÔNG hiện với user thường (tác giả vẫn hiện bí danh
+  // bình thường trong feed, không lộ đây là bài mồi).
+  isSeeded            Boolean                                @default(false) @map("is_seeded")
   createdAt           DateTime                               @default(now()) @map("created_at")
   updatedAt           DateTime                               @updatedAt @map("updated_at")
 
@@ -286,24 +317,31 @@ enum CommentVisibility {
 }
 
 model Comment {
-  id         String            @id @default(uuid()) @db.Uuid
-  postId     String            @map("post_id") @db.Uuid
-  authorId   String            @map("author_id") @db.Uuid
-  content    String
-  visibility CommentVisibility @default(public)
-  isPinned   Boolean           @default(false) @map("is_pinned") // chủ bài tự ghim (bussiness §4.1.1)
+  id              String            @id @default(uuid()) @db.Uuid
+  postId          String            @map("post_id") @db.Uuid
+  authorId        String            @map("author_id") @db.Uuid
+  content         String
+  visibility      CommentVisibility @default(public)
+  isPinned        Boolean           @default(false) @map("is_pinned") // chủ bài tự ghim (bussiness §4.1.1)
   // ẩn bởi chủ bài (setHiddenByOwner) HOẶC tự xoá bởi chính tác giả (deleteOwn) — cùng field vì hiệu
   // ứng với người xem giống hệt nhau (không còn ai thấy, không có màn khôi phục). Không còn liên quan
   // điểm uy tín thấp — logic tự động ẩn theo trust score đã bỏ (bussiness §4.1 quy tắc 3, đã bỏ).
-  isHidden   Boolean           @default(false) @map("is_hidden")
-  createdAt  DateTime          @default(now()) @map("created_at")
+  isHidden        Boolean           @default(false) @map("is_hidden")
+  // Reply lồng nhau CHỈ 1 cấp (quyết định 2026-08-20) — trả lời 1 reply tự "phẳng hoá" về đúng bình
+  // luận GỐC lúc tạo (CommentsService.resolveParentCommentId), null = bình luận gốc. Ẩn 1 bình luận
+  // gốc tự động ẩn theo mọi reply trực tiếp của nó (CommentsService.cascadeHideReplies).
+  parentCommentId String?           @map("parent_comment_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at")
 
-  post    Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
-  author  User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  votes   Vote[]   @relation("VoteOnComment")
-  reports Report[]
+  post          Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author        User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parentComment Comment?  @relation("CommentReplies", fields: [parentCommentId], references: [id], onDelete: Cascade)
+  replies       Comment[] @relation("CommentReplies")
+  votes         Vote[]    @relation("VoteOnComment")
+  reports       Report[]
 
   @@index([postId, createdAt])
+  @@index([parentCommentId])
   @@map("comments")
 }
 
@@ -431,6 +469,10 @@ model Report {
   description       String?
   status            ReportStatus     @default(pending)
   reviewedByAdminId String?          @map("reviewed_by_admin_id") @db.Uuid
+  // Mốc LẦN ĐẦU admin xử lý (ReportsService.updateStatus không ghi đè nếu đã có) — dùng tính "thời
+  // gian xử lý report trung bình" (G7, tai-lieu-chuc-nang.md #109). Trước đây không có cột nào ghi
+  // lại thời điểm này, chỉ có createdAt + reviewedByAdminId (biết AI xử lý, không biết XỬ LÝ LÚC NÀO).
+  reviewedAt        DateTime?        @map("reviewed_at")
   createdAt         DateTime         @default(now()) @map("created_at")
 
   post            Post?            @relation(fields: [postId], references: [id], onDelete: Cascade)
@@ -483,8 +525,6 @@ model MerchantProfile {
   isVerified          Boolean                                @default(false) @map("is_verified") // điều kiện để dùng ảnh thư viện (bussiness §2.1)
   verifiedAt          DateTime?                              @map("verified_at")
   phoneVisibility     PhoneVisibility                        @default(hidden) @map("phone_visibility")
-  businessHoursStart  String?                                @map("business_hours_start") // "06:00"
-  businessHoursEnd    String?                                @map("business_hours_end")
   zaloEnabled         Boolean                                @default(false) @map("zalo_enabled")
   freeMonthsRemaining Int                                    @default(0) @map("free_months_remaining")
   createdAt           DateTime                               @default(now()) @map("created_at")
@@ -495,8 +535,25 @@ model MerchantProfile {
   reports             Report[]
   subscriptions       MerchantSubscription[]
   paymentTransactions PaymentTransaction[]
+  businessHours       MerchantBusinessHour[]
 
   @@map("merchant_profiles")
+}
+
+// Khung giờ hiện SĐT/Zalo theo TỪNG NGÀY trong tuần (tai-lieu-chuc-nang.md #43) — thay cho 2 cột
+// phẳng businessHoursStart/End cũ (1 khung áp dụng mọi ngày). Ngày nào KHÔNG có dòng tương ứng ở đây
+// = merchant chưa cấu hình ngày đó, coi như ẨN số ngày đó (an toàn hơn suy đoán 1 khung mặc định).
+model MerchantBusinessHour {
+  id         String @id @default(uuid()) @db.Uuid
+  merchantId String @map("merchant_id") @db.Uuid
+  dayOfWeek  Int    @map("day_of_week") // 0=Chủ nhật .. 6=Thứ Bảy, khớp Date.getDay() giờ Việt Nam
+  startTime  String @map("start_time") // "HH:mm"
+  endTime    String @map("end_time") // "HH:mm"
+
+  merchant MerchantProfile @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, dayOfWeek])
+  @@map("merchant_business_hours")
 }
 
 model MerchantMenuPhoto {
@@ -528,6 +585,7 @@ model AdminUser {
   reviewedTrustHistory TrustScoreHistory[]
   reviewedAppeals      PenaltyAppeal[]
   reviewedReports      Report[]
+  publishedLegalDocs   LegalDocument[]
 
   @@map("admin_users")
 }
@@ -624,6 +682,11 @@ model UserBankAccount {
   userId                 String    @map("user_id") @db.Uuid
   bankCode               String    @map("bank_code")
   accountNumberEncrypted String    @map("account_number_encrypted") // mã hoá ở tầng service, không lưu plaintext
+  // Hash CÓ THỂ SO SÁNH (HMAC, khác accountNumberEncrypted dùng IV ngẫu nhiên) để dò trùng số tài
+  // khoản giữa các user — rào cản chống gian lận CHÍNH (bussiness §11: "1 số tài khoản ngân hàng chỉ
+  // được gắn với đúng 1 tài khoản Phố Mình"). Nullable — dòng cũ trước khi có field này chưa có hash
+  // (không backfill được bằng SQL thuần, cần giải mã ở tầng ứng dụng), chỉ áp dụng cho liên kết MỚI.
+  accountNumberHash      String?   @map("account_number_hash")
   accountHolderName      String    @map("account_holder_name")
   verifiedAt             DateTime? @map("verified_at")
   createdAt              DateTime  @default(now()) @map("created_at")
@@ -631,6 +694,7 @@ model UserBankAccount {
   user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   payoutRequests PayoutRequest[]
 
+  @@index([accountNumberHash])
   @@map("user_bank_accounts")
 }
 
@@ -875,4 +939,65 @@ model MarketingLead {
 
   @@index([type, createdAt])
   @@map("marketing_leads")
+}
+
+// Khu vực thí điểm cho admin bật/tắt + so sánh số liệu (tai-lieu-chuc-nang.md #101) — trước đây
+// KHÔNG có khái niệm "khu vực chính thức" nào trong data model (chỉ có FixedArea cá nhân từng user
+// và toạ độ tự do trên mỗi bài đăng). isActive THUẦN TUÝ là cờ đánh dấu nội bộ cho admin theo dõi
+// tiến độ mở rộng — KHÔNG chặn/ảnh hưởng gì tới feed hay đăng bài thật của user trong khu đó (Nhóm E
+// là công cụ vận hành cold-start, không phải cơ chế giới hạn truy cập).
+model PilotArea {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  lat       Float
+  lng       Float
+  radiusKm  Float    @default(2) @map("radius_km")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("pilot_areas")
+}
+
+enum LegalDocType {
+  terms
+  privacy
+}
+
+// Quản lý điều khoản/chính sách (tai-lieu-chuc-nang.md #103) — trước đây "phiên bản hiện hành" chỉ
+// là 1 hằng số `CURRENT_TERMS_VERSION` cứng trong code (account-lifecycle.service.ts), không sửa
+// được qua API. Nay là NGUỒN THẬT SỰ: AccountLifecycleService.acceptTerms/getTermsStatus đọc
+// isCurrent từ bảng này thay vì hằng số — sửa ở đây ảnh hưởng THẬT tới luồng bắt buộc đồng ý điều
+// khoản lúc onboarding (mục 67), không phải màn quản lý cảnh (decorative). Publish 1 bản mới =
+// version mới isCurrent=true + version cũ cùng docType tự động isCurrent=false (transaction).
+model LegalDocument {
+  id                 String       @id @default(uuid()) @db.Uuid
+  docType            LegalDocType @map("doc_type")
+  version            String
+  content            String
+  isCurrent          Boolean      @default(false) @map("is_current")
+  publishedByAdminId String?      @map("published_by_admin_id") @db.Uuid
+  createdAt          DateTime     @default(now()) @map("created_at")
+
+  publishedByAdmin AdminUser? @relation(fields: [publishedByAdminId], references: [id])
+
+  @@unique([docType, version])
+  @@index([docType, isCurrent])
+  @@map("legal_documents")
+}
+
+// Mục tiêu KPI cho cộng tác viên (ngoài phạm vi tài liệu chức năng gốc — bổ sung theo yêu cầu vận
+// hành). 1 bản/CTV, áp dụng LIÊN TỤC (không phải đặt lại từng tháng) — admin sửa khi cần đổi mục
+// tiêu. Số liệu THẬT (bài/vote/bình luận) không lưu ở đây — đếm trực tiếp từ Post/Vote/Comment theo
+// khoảng ngày admin chọn lúc xem (xem CollaboratorsService.getStats), tránh trùng lặp dữ liệu.
+model CollaboratorKpiTarget {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  postsTarget    Int      @default(0) @map("posts_target")
+  votesTarget    Int      @default(0) @map("votes_target")
+  commentsTarget Int      @default(0) @map("comments_target")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("collaborator_kpi_targets")
 }

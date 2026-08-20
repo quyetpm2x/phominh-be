@@ -12,18 +12,26 @@ import { FirebaseModule } from './integrations/firebase/firebase.module';
 import { SupabaseModule } from './integrations/supabase/supabase.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
+import { AppSessionsModule } from './modules/app-sessions/app-sessions.module';
+import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { TokenModule } from './modules/auth/token.module';
+import { CollaboratorsModule } from './modules/collaborators/collaborators.module';
 import { CommentsModule } from './modules/comments/comments.module';
 import { EmergencyModule } from './modules/emergency/emergency.module';
+import { LegalDocumentsModule } from './modules/legal-documents/legal-documents.module';
 import { MerchantsModule } from './modules/merchants/merchants.module';
 import { ModerationModule } from './modules/moderation/moderation.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { PenaltyAppealsModule } from './modules/penalty-appeals/penalty-appeals.module';
+import { PilotAreasModule } from './modules/pilot-areas/pilot-areas.module';
 import { PostsModule } from './modules/posts/posts.module';
 import { PublicModule } from './modules/public/public.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { RewardsModule } from './modules/rewards/rewards.module';
+import { SeedContentModule } from './modules/seed-content/seed-content.module';
+import { UserActivityModule } from './modules/user-activity/user-activity.module';
 import { UsersModule } from './modules/users/users.module';
 import { TrustScoreModule } from './modules/votes/trust-score.module';
 import { VotesModule } from './modules/votes/votes.module';
@@ -82,6 +90,14 @@ import { PrismaModule } from './prisma/prisma.module';
     PublicModule,
     NotificationsModule,
     AnalyticsModule,
+    AuditModule,
+    PilotAreasModule,
+    PenaltyAppealsModule,
+    SeedContentModule,
+    LegalDocumentsModule,
+    CollaboratorsModule,
+    AppSessionsModule,
+    UserActivityModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: HttpExceptionFilter },

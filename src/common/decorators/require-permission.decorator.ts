@@ -10,6 +10,7 @@ export const PERMISSION_KEYS = [
   'moderate_comment_attacks',
   'verify_emergency',
   'view_users',
+  'view_posts',
   'view_collusion_flags',
   'view_fraud_signals',
   'manage_user_lock',

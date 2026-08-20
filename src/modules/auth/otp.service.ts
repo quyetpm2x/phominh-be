@@ -23,7 +23,7 @@ interface OtpRow {
 }
 
 // Toàn bộ vòng đời OTP: validate/chuẩn hoá SĐT, 2 lớp rate-limit (theo SĐT + toàn hệ thống), sinh +
-// hash + lưu, gọi SmsOtpService gửi thật, và verify. Xem tai-lieu-chi-tiet-chuc-nang.md — mục
+// hash + lưu, gọi SmsOtpService gửi thật, và verify. Xem tai-lieu-chuc-nang.md — mục
 // "Nhập số điện thoại & Xác thực OTP" cho sơ đồ đầy đủ từng bước.
 @Injectable()
 export class OtpService {
@@ -51,7 +51,7 @@ export class OtpService {
 
     // pg_advisory_xact_lock khoá riêng theo SĐT (hashtext) — request khác cùng SĐT phải đợi tới khi
     // transaction này commit, nên 2 lần đếm rate-limit bên dưới không thể bị race condition (không
-    // cần Redis ở quy mô MVP, xem phân tích trong tai-lieu-chi-tiet-chuc-nang.md).
+    // cần Redis ở quy mô MVP, xem phân tích trong tai-lieu-chuc-nang.md).
     const record = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${phone}))`;
       await this.assertPerPhoneRateLimit(tx, phone, resendCooldownSeconds);

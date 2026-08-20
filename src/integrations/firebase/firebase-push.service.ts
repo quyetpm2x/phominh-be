@@ -6,7 +6,7 @@ import { getMessaging } from 'firebase-admin/messaging';
 // Gửi push thật qua Firebase Cloud Messaging — 2 mode qua PUSH_NOTIFICATION_MODE, cùng nguyên tắc
 // SmsOtpService (SMS_OTP_MODE): mặc định "console" để KHÔNG cần credentials Firebase thật khi chạy
 // dev hàng ngày, chỉ log ra terminal. Đổi "real" + điền FIREBASE_PROJECT_ID/CLIENT_EMAIL/PRIVATE_KEY
-// khi đã có Firebase project thật (tai-lieu-chi-tiet-chuc-nang.md mục "Môi trường dev").
+// khi đã có Firebase project thật (tai-lieu-chuc-nang.md mục "Môi trường dev").
 @Injectable()
 export class FirebasePushService implements OnModuleInit {
   private readonly logger = new Logger(FirebasePushService.name);

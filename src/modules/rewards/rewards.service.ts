@@ -15,6 +15,14 @@ import { RewardWalletService } from './reward-wallet.service';
 
 const QUALIFICATION_WINDOW_DAYS = 7; // bussiness §5.1d — chỉ trả thưởng sau khi có hoạt động thật trong 7 ngày đầu
 
+export interface MyReferralItem {
+  id: string;
+  invitedUserAlias: string;
+  createdAt: Date;
+  qualified: boolean;
+  rewardGranted: boolean;
+}
+
 @Injectable()
 export class RewardsService {
   constructor(
@@ -42,8 +50,35 @@ export class RewardsService {
     });
   }
 
-  // Admin/cron gọi thủ công ở base scaffold — kiểm tra người được mời có hoạt động thật trong cửa
-  // sổ 7 ngày (dùng AppSession làm tín hiệu, nhất quán với hệ số hoạt động ở TrustScoreService).
+  // Xem danh sách đã giới thiệu thành công (tai-lieu-chuc-nang.md #56) — trước đây không có endpoint
+  // nào liệt kê ReferralRedemption theo owner. Không có FK Prisma từ invitedUserId → User (schema
+  // không khai báo quan hệ này), nên tra alias qua truy vấn riêng thay vì include.
+  async listMyReferrals(ownerUserId: string): Promise<MyReferralItem[]> {
+    const redemptions = await this.prisma.referralRedemption.findMany({
+      where: { referralCode: { ownerUserId } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (redemptions.length === 0) return [];
+
+    const invitedUsers = await this.prisma.user.findMany({
+      where: { id: { in: redemptions.map((r) => r.invitedUserId) } },
+      select: { id: true, alias: true },
+    });
+    const aliasById = new Map(invitedUsers.map((u) => [u.id, u.alias]));
+
+    return redemptions.map((r) => ({
+      id: r.id,
+      invitedUserAlias: aliasById.get(r.invitedUserId) ?? 'Người dùng đã xoá',
+      createdAt: r.createdAt,
+      qualified: r.qualifiedAt !== null,
+      rewardGranted: r.rewardGranted,
+    }));
+  }
+
+  // Gọi bởi ReferralQualificationCronService (chạy hàng ngày) — trước đây hàm này mồ côi, không ai
+  // gọi tới nên thưởng giới thiệu không bao giờ được cấp dù người mời đủ điều kiện. Kiểm tra người
+  // được mời có hoạt động thật trong cửa sổ 7 ngày (dùng AppSession làm tín hiệu, nhất quán với hệ
+  // số hoạt động ở TrustScoreService).
   async qualifyIfActive(redemptionId: string): Promise<boolean> {
     const redemption = await this.prisma.referralRedemption.findUniqueOrThrow({
       where: { id: redemptionId },

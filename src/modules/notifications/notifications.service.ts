@@ -1,11 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import type { Notification, NotificationDigestSetting, PushToken } from '@prisma/client';
 
+import { currentVietnamHHmm } from '../../common/utils/vietnam-time.util';
 import { FirebasePushService } from '../../integrations/firebase/firebase-push.service';
 import { PrismaService } from '../../prisma/prisma.service';
 
 import type { RegisterPushTokenDto } from './dto/register-push-token.dto';
 import type { UpdateNotificationSettingsDto } from './dto/update-notification-settings.dto';
+import { isWithinQuietHours } from './quiet-hours.util';
 
 const NOTIFICATION_PAGE_SIZE = 50;
 
@@ -42,8 +44,10 @@ export class NotificationsService {
   }
 
   // Trung tâm thông báo trong app (tai-lieu-chuc-nang.md #47, #49) — LUÔN ghi vào bảng notifications
-  // để liệt kê lại được, kèm gửi push best-effort (lỗi push không được làm hỏng luồng gọi hàm này,
-  // xem FirebasePushService.send — tự nuốt lỗi, không throw).
+  // để liệt kê lại được (không bao giờ mất tin), kèm gửi push best-effort — TRỪ khi đang trong "Giờ
+  // yên tĩnh" của user (mục 48: trước đây quietHoursStart/End chỉ lưu, không nơi nào đọc lại để thật
+  // sự hoãn push, nên máy vẫn kêu/rung giữa đêm bất kể user đã đặt giờ nào). Lỗi push không được làm
+  // hỏng luồng gọi hàm này, xem FirebasePushService.send — tự nuốt lỗi, không throw.
   async createNotification(
     userId: string,
     type: string,
@@ -55,8 +59,16 @@ export class NotificationsService {
       data: { userId, type, title, body, referenceId },
     });
 
-    const tokens = await this.prisma.pushToken.findMany({ where: { userId } });
-    await Promise.all(tokens.map((t) => this.firebasePush.send(t.token, title, body)));
+    const settings = await this.getDigestSettings(userId);
+    const inQuietHours = isWithinQuietHours(
+      currentVietnamHHmm(),
+      settings.quietHoursStart,
+      settings.quietHoursEnd,
+    );
+    if (!inQuietHours) {
+      const tokens = await this.prisma.pushToken.findMany({ where: { userId } });
+      await Promise.all(tokens.map((t) => this.firebasePush.send(t.token, title, body)));
+    }
 
     return notification;
   }

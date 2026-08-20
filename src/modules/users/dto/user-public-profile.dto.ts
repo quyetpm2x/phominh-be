@@ -10,4 +10,7 @@ export class UserPublicProfileDto {
   @ApiProperty() trustBadgeLabel!: string;
   @ApiProperty() postCount!: number;
   @ApiProperty() createdAt!: Date;
+  // Chỉ có giá trị nếu tài khoản này là merchant — cho FE biết có thể gửi report
+  // targetType='merchant_suspicious' (tai-lieu-chuc-nang.md #31) hay không, và dùng ID nào.
+  @ApiProperty({ required: false, nullable: true }) merchantId!: string | null;
 }

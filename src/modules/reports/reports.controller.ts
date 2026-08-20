@@ -60,6 +60,15 @@ export class ReportsController {
     return this.reportQueries.findPrivateCommentReports(status);
   }
 
+  // D2 (tai-lieu-chuc-nang.md #98).
+  @ApiBearerAuth()
+  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @RequirePermission('manage_merchants')
+  @Get('admin/reports/merchant-suspicious')
+  findMerchantSuspiciousReports(@Query('status') status?: ReportStatus) {
+    return this.reportQueries.findMerchantSuspiciousReports(status);
+  }
+
   // Bắt buộc ghi lý do trước khi xem nội dung — ghi SensitiveDataAccessLog (bussiness §9.9).
   @ApiBearerAuth()
   @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)

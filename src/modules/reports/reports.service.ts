@@ -57,7 +57,14 @@ export class ReportsService {
 
     const updated = await this.prisma.report.update({
       where: { id: reportId },
-      data: { status: dto.status, reviewedByAdminId: adminId },
+      // reviewedAt chỉ ghi LẦN ĐẦU (giữ nguyên nếu report đã từng đổi status trước đó) — dùng tính
+      // "thời gian xử lý report trung bình" (G7, mục 109), phải là mốc admin ĐẦU TIÊN chạm vào,
+      // không phải lần đổi status gần nhất.
+      data: {
+        status: dto.status,
+        reviewedByAdminId: adminId,
+        reviewedAt: report.reviewedAt ?? new Date(),
+      },
     });
 
     if (dto.removePost && report.postId) {

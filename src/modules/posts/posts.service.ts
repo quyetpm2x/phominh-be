@@ -152,14 +152,18 @@ export class PostsService {
     const row = rows[0];
     if (!row) throw new NotFoundException('Không tìm thấy bài đăng');
 
-    const [badges, votedIds] = await Promise.all([
+    // SĐT/Zalo (tai-lieu-chuc-nang.md #43) — chỉ tra cứu cho bài merchant, và trả null nếu merchant
+    // đang ở ngoài khung giờ hiện số (không phải lỗi, chỉ đơn giản là chưa/không tới lượt hiện).
+    const [badges, votedIds, merchantContact] = await Promise.all([
       this.usersService.getBadgeLabelsForUsers([row.author_id]),
       this.votesService.getVotedTargetIds(viewerId, 'post', [row.id]),
+      row.post_type === 'merchant' ? this.merchantsService.getPublicContact(row.author_id) : null,
     ]);
     return {
       ...toBaseSummary(row),
       authorBadge: badges.get(row.author_id) ?? DEFAULT_BADGE_LABEL,
       hasVoted: votedIds.has(row.id),
+      merchantContact,
     };
   }
 

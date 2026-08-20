@@ -49,6 +49,9 @@ export class LeaderboardSnapshotCronService {
         earnViaPostsEnabled: true,
         earnEnabledAt: { not: null, lte: range.end },
         monthlyTierSnapshots: { some: { period: range.period, tierAtMonthStart: tier } },
+        // Cộng tác viên nội bộ vẫn tương tác bình thường (để trông tự nhiên) nhưng không được
+        // chiếm suất xếp hạng/thưởng thật của user thật.
+        isCollaborator: false,
       },
       select: { id: true },
     });

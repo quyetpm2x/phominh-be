@@ -1,4 +1,16 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { PayoutStatus } from '@prisma/client';
 
@@ -49,6 +61,16 @@ export class PaymentsController {
   @Get('mobile/users/me/bank-accounts')
   getMyBankAccounts(@CurrentUser() user: AuthenticatedUser) {
     return this.paymentsService.getMyBankAccounts(user.id);
+  }
+
+  // Gỡ tài khoản đã liên kết (tai-lieu-chuc-nang.md #54) — không có PATCH sửa tại chỗ, xem lý do
+  // trong PaymentsService.unlinkBankAccount.
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Delete('mobile/users/me/bank-accounts/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  unlinkBankAccount(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.paymentsService.unlinkBankAccount(user.id, id);
   }
 
   @ApiBearerAuth()

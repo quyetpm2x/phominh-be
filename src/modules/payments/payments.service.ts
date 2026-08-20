@@ -1,8 +1,15 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { PayoutRequest, UserBankAccount } from '@prisma/client';
 
-import { encryptAccountNumber } from '../../common/utils/bank-account-crypto';
+import { encryptAccountNumber, hashAccountNumber } from '../../common/utils/bank-account-crypto';
 import { retryWithBackoff } from '../../common/utils/retry.util';
 import {
   PAYMENT_GATEWAY,
@@ -72,13 +79,30 @@ export class PaymentsService {
     });
   }
 
+  // Chặn 1 số tài khoản ngân hàng gắn với NHIỀU tài khoản Phố Mình (bussiness §11 — rào cản chống
+  // gian lận CHÍNH, khác Device ID chỉ là "tín hiệu phụ" dễ lách theo mục 4.4) — trước đây hoàn toàn
+  // không có cách nào dò trùng vì accountNumberEncrypted mã hoá khác nhau mỗi lần dù cùng 1 số tài
+  // khoản (AES-GCM, IV ngẫu nhiên). Không chặn liên kết TRÙNG VỚI CHÍNH MÌNH (vd sau khi gỡ rồi thêm
+  // lại) — chỉ chặn khi thuộc userId KHÁC.
   async linkBankAccount(userId: string, dto: LinkBankAccountDto): Promise<UserBankAccount> {
     const secret = this.config.getOrThrow<string>('BANK_ACCOUNT_ENCRYPTION_KEY');
+    const accountNumberHash = hashAccountNumber(dto.bankCode, dto.accountNumber, secret);
+
+    const linkedElsewhere = await this.prisma.userBankAccount.findFirst({
+      where: { accountNumberHash, userId: { not: userId } },
+    });
+    if (linkedElsewhere) {
+      throw new ConflictException(
+        'Số tài khoản ngân hàng này đã được liên kết với một tài khoản Phố Mình khác — mỗi số tài khoản chỉ được gắn với đúng 1 tài khoản',
+      );
+    }
+
     return this.prisma.userBankAccount.create({
       data: {
         userId,
         bankCode: dto.bankCode,
         accountNumberEncrypted: encryptAccountNumber(dto.accountNumber, secret),
+        accountNumberHash,
         accountHolderName: dto.accountHolderName,
       },
     });
@@ -95,11 +119,39 @@ export class PaymentsService {
     return accounts.map(({ accountNumberEncrypted: _omit, ...rest }) => rest);
   }
 
+  // Gỡ tài khoản ngân hàng đã liên kết (tai-lieu-chuc-nang.md #54) — CHỈ gỡ (không sửa số tài khoản
+  // tại chỗ): sửa trực tiếp sẽ vòng qua eKYC/cooldown 48-72h đã xác thực cho SỐ CŨ, mở lỗ hổng đổi
+  // tài khoản ngay trước khi rút tiền. "Đổi tài khoản" = gỡ cái cũ (nếu chưa dùng) + liên kết cái mới
+  // qua linkBankAccount() (đã có sẵn, tự chạy lại cooldown). Chặn gỡ nếu đã có PayoutRequest tham
+  // chiếu — PayoutRequest.bankAccountId là onDelete: Cascade, xoá sẽ MẤT LUÔN lịch sử rút tiền thật.
+  async unlinkBankAccount(userId: string, accountId: string): Promise<void> {
+    const account = await this.prisma.userBankAccount.findFirst({
+      where: { id: accountId, userId },
+    });
+    if (!account) throw new NotFoundException('Không tìm thấy tài khoản ngân hàng này');
+
+    const payoutCount = await this.prisma.payoutRequest.count({
+      where: { bankAccountId: accountId },
+    });
+    if (payoutCount > 0) {
+      throw new BadRequestException(
+        'Không thể gỡ tài khoản đã có lịch sử rút tiền — liên kết tài khoản mới thay vì gỡ tài khoản này',
+      );
+    }
+
+    await this.prisma.userBankAccount.delete({ where: { id: accountId } });
+  }
+
   // Tạo yêu cầu chi hộ + validate đầy đủ (bussiness §5.1e): eKYC đã xác thực, đủ 48-72h sau liên kết
   // lần đầu, đúng bội số 50.000đ, không vượt số dư ví. Trừ ví NGAY (giữ chỗ số dư) — app không giữ
   // tiền ở giữa tại bất kỳ thời điểm nào, tiền chỉ thật sự rời hệ thống khi admin duyệt qua
   // processPayout(); nếu gateway báo lỗi ở bước đó, hoàn lại ví (xem processPayout).
   async requestPayout(userId: string, dto: RequestPayoutDto): Promise<PayoutRequestResult> {
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (user.isCollaborator) {
+      throw new BadRequestException('Tài khoản cộng tác viên không được rút thưởng thật');
+    }
+
     const bankAccount = await this.prisma.userBankAccount.findFirst({
       where: { id: dto.bankAccountId, userId },
     });

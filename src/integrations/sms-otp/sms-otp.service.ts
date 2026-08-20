@@ -9,7 +9,7 @@ interface EsmsResponse {
 
 // Gọi eSMS.vn thật (SendMultipleMessage_V4_post_json) — field/endpoint xác nhận từ
 // developers.esms.vn ngày viết code này, kiểm tra lại nếu eSMS đổi API. 3 mode qua SMS_OTP_MODE,
-// mặc định "console" để KHÔNG tốn phí SMS khi chạy dev hàng ngày (xem tai-lieu-chi-tiet-chuc-nang.md
+// mặc định "console" để KHÔNG tốn phí SMS khi chạy dev hàng ngày (xem tai-lieu-chuc-nang.md
 // mục "Môi trường dev" — cách tránh chi phí SMS).
 @Injectable()
 export class SmsOtpService {
@@ -53,7 +53,7 @@ export class SmsOtpService {
 
     const data = (await res.json()) as EsmsResponse;
     // CodeResult=100 nghĩa là eSMS đã NHẬN request, chưa chắc SMS đã tới máy — muốn chắc chắn cần
-    // khai báo CallbackUrl (webhook), bỏ qua ở MVP theo tai-lieu-chi-tiet-chuc-nang.md.
+    // khai báo CallbackUrl (webhook), bỏ qua ở MVP theo tai-lieu-chuc-nang.md.
     if (data.CodeResult !== '100') {
       throw new Error(
         `eSMS gửi thất bại: CodeResult=${data.CodeResult} ${data.ErrorMessage ?? ''}`,

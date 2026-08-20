@@ -22,6 +22,7 @@ import { JwtAuthGuard, type AuthenticatedUser } from '../../common/guards/jwt-au
 
 import { SetFixedAreaDto } from './dto/set-fixed-area.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { TrustHistoryService } from './trust-history.service';
 import { UsersService } from './users.service';
 
 const MAX_AVATAR_SIZE_BYTES = 10 * 1024 * 1024;
@@ -31,11 +32,20 @@ const MAX_AVATAR_SIZE_BYTES = 10 * 1024 * 1024;
 @UseGuards(JwtAuthGuard)
 @Controller('api/mobile/users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly trustHistory: TrustHistoryService,
+  ) {}
 
   @Get('me')
   getMe(@CurrentUser() user: AuthenticatedUser) {
     return this.usersService.getProfile(user.id);
+  }
+
+  // Lịch sử điểm uy tín đầy đủ (tai-lieu-chuc-nang.md #62).
+  @Get('me/trust-history')
+  getMyTrustHistory(@CurrentUser() user: AuthenticatedUser) {
+    return this.trustHistory.getMyHistory(user.id);
   }
 
   @Patch('me')

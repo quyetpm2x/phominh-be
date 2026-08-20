@@ -1,11 +1,18 @@
-import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 
 import { PrismaService } from '../../prisma/prisma.service';
 
 import type { AdminLoginDto } from './dto/admin-login.dto';
+import type { ChangeAdminPasswordDto } from './dto/change-admin-password.dto';
 import type { CreateAdminDto } from './dto/create-admin.dto';
+import type { UpdateAdminPermissionsDto } from './dto/update-admin-permissions.dto';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -31,6 +38,28 @@ export class AdminService {
       accessToken,
       admin: { id: admin.id, email: admin.email, name: admin.name, isOwner: admin.isOwner },
     };
+  }
+
+  // Hồ sơ của chính admin đang đăng nhập — JWT payload chỉ có {id, email, isOwner} (không có
+  // name), nên FE cần route riêng để lấy đủ thông tin hiển thị (avatar/tên) thay vì đọc từ token.
+  async getMe(adminId: string) {
+    const admin = await this.prisma.adminUser.findUnique({ where: { id: adminId } });
+    if (!admin) throw new NotFoundException('Không tìm thấy tài khoản admin');
+    return { id: admin.id, email: admin.email, name: admin.name, isOwner: admin.isOwner };
+  }
+
+  // Admin tự đổi mật khẩu của chính mình — khác updatePermissions() (Owner sửa quyền của người
+  // khác), route này không cần permission 'manage_admins' vì ai cũng được đổi mật khẩu bản thân.
+  async changePassword(adminId: string, dto: ChangeAdminPasswordDto) {
+    const admin = await this.prisma.adminUser.findUnique({ where: { id: adminId } });
+    if (!admin) throw new NotFoundException('Không tìm thấy tài khoản admin');
+    if (!(await bcrypt.compare(dto.currentPassword, admin.passwordHash))) {
+      throw new UnauthorizedException('Mật khẩu hiện tại không đúng');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
+    await this.prisma.adminUser.update({ where: { id: adminId }, data: { passwordHash } });
+    return { success: true };
   }
 
   // Owner tự tích chọn permission cho từng admin mới — mô hình checkbox, không phải vai trò cố định
@@ -86,5 +115,42 @@ export class AdminService {
       createdAt: a.createdAt,
       permissionKeys: a.permissions.map((p) => p.permission.permissionKey),
     }));
+  }
+
+  // Sửa/thu hồi quyền admin đã cấp (tai-lieu-chuc-nang.md #112) — trước đây không có route
+  // PATCH/DELETE nào, quyền chỉ gán được lúc tạo (#111). Owner tự bỏ qua toàn bộ check quyền
+  // (AdminPermissionGuard) nên sửa permissionKeys của 1 owner không có tác dụng thực tế.
+  async updatePermissions(
+    targetAdminId: string,
+    dto: UpdateAdminPermissionsDto,
+    updatedByAdminId: string,
+  ) {
+    const target = await this.prisma.adminUser.findUnique({ where: { id: targetAdminId } });
+    if (!target) throw new NotFoundException('Không tìm thấy tài khoản admin');
+
+    const permissions = await this.prisma.permission.findMany({
+      where: { permissionKey: { in: dto.permissionKeys } },
+    });
+
+    await this.prisma.$transaction([
+      this.prisma.adminUserPermission.deleteMany({ where: { adminUserId: targetAdminId } }),
+      ...(permissions.length
+        ? [
+            this.prisma.adminUserPermission.createMany({
+              data: permissions.map((p) => ({ adminUserId: targetAdminId, permissionId: p.id })),
+            }),
+          ]
+        : []),
+      this.prisma.adminActionLog.create({
+        data: {
+          adminUserId: updatedByAdminId,
+          action: 'update_admin_permissions',
+          targetType: 'admin_user',
+          targetId: targetAdminId,
+        },
+      }),
+    ]);
+
+    return { id: targetAdminId, permissionKeys: permissions.map((p) => p.permissionKey) };
   }
 }

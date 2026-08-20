@@ -47,6 +47,20 @@ export class ReportQueriesService {
     });
   }
 
+  // Report "nghi ngờ bán chuyên nghiệp trá hình" (tai-lieu-chuc-nang.md #98, ScreenId D2) — trước
+  // đây user tạo được (mục 31, targetType='merchant_suspicious') nhưng KHÔNG route admin nào đọc
+  // lại. Xử lý (actioned/dismissed) dùng CHUNG ReportsService.updateStatus() — hàm đó đã hỗ trợ sẵn
+  // report.merchantId từ trước (resolveViolatorId), không cần sửa gì thêm ở đó.
+  async findMerchantSuspiciousReports(status?: ReportStatus): Promise<Report[]> {
+    return this.prisma.report.findMany({
+      where: { targetType: 'merchant_suspicious', status },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        merchant: { select: { id: true, businessName: true, addressText: true } },
+      },
+    });
+  }
+
   // Nội dung KHÔNG include ở đây — bắt buộc gọi ReportsService.revealPrivateComment() (ghi log lý
   // do) trước mới xem được (bussiness §9.9, tai-lieu-chuc-nang.md #88).
   async findPrivateCommentReports(status?: ReportStatus): Promise<Report[]> {

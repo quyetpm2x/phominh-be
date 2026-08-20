@@ -23,4 +23,10 @@ export class RewardsController {
   redeemReferral(@CurrentUser() user: AuthenticatedUser, @Body() dto: RedeemReferralDto) {
     return this.rewardsService.redeemReferral(user.id, dto.code);
   }
+
+  // Xem danh sách đã giới thiệu thành công (tai-lieu-chuc-nang.md #56).
+  @Get('referral-code/redemptions')
+  listMyReferrals(@CurrentUser() user: AuthenticatedUser) {
+    return this.rewardsService.listMyReferrals(user.id);
+  }
 }
